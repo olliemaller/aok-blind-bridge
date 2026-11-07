@@ -1,0 +1,4 @@
+.pio/
+release/*.bin
+__pycache__/
+include/web_ui_gz.h

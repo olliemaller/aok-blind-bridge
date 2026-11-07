@@ -1,0 +1,1198 @@
+// A-OK Blind Bridge — ESP32 + CC1101 firmware for A-OK 433.92 MHz blind motors.
+//
+// Based on pgnehm/ESP32-Orvibo-A-OK-HomeAssistant-Blind-Bridge (protocol research, encoder rules,
+// CC1101 async OOK approach). This version adds: on-device learning from the physical remote,
+// live remote listening (positions follow the hand remote), web setup with no recompiling,
+// separate open/close travel times, position memory across reboots, favourite positions,
+// group blinds, travel-time calibration, a remote-button event entity and a Wi-Fi setup portal.
+
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <ArduinoOTA.h>
+#include <DNSServer.h>
+#include <ELECHOUSE_CC1101_SRC_DRV.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <PubSubClient.h>
+#include <Update.h>
+#include <WebServer.h>
+#include <WiFi.h>
+
+#include "aok_protocol.h"
+#include "web_ui.h"
+
+#define FW_VERSION "1.0.0"
+
+// HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
+#ifndef DEFAULT_PIN_SCK
+#define DEFAULT_PIN_SCK 18
+#endif
+#ifndef DEFAULT_PIN_MISO
+#define DEFAULT_PIN_MISO 19
+#endif
+#ifndef DEFAULT_PIN_MOSI
+#define DEFAULT_PIN_MOSI 23
+#endif
+#ifndef DEFAULT_PIN_CS
+#define DEFAULT_PIN_CS 5
+#endif
+#ifndef DEFAULT_PIN_GDO0
+#define DEFAULT_PIN_GDO0 12
+#endif
+#ifndef DEFAULT_PIN_GDO2
+#define DEFAULT_PIN_GDO2 27
+#endif
+#ifndef DEFAULT_PIN_LED
+#define DEFAULT_PIN_LED 2
+#endif
+
+namespace {
+
+constexpr size_t kMaxBlinds = 16;
+constexpr size_t kMaxFrames = 12;
+constexpr size_t kRingSize = 2048;  // power of two
+constexpr uint32_t kDedupeMs = 900;
+
+enum class Motion : uint8_t { Stopped, Opening, Closing };
+
+struct Pins {
+  int sck = DEFAULT_PIN_SCK, miso = DEFAULT_PIN_MISO, mosi = DEFAULT_PIN_MOSI, cs = DEFAULT_PIN_CS;
+  int gdo0 = DEFAULT_PIN_GDO0, gdo2 = DEFAULT_PIN_GDO2, led = DEFAULT_PIN_LED;
+  float mhz = 433.92f;
+  int paDbm = 10;
+};
+
+struct NetCfg {
+  String ssid, pass, hostname = "aok-blinds", adminPass;
+  String mqttHost;
+  uint16_t mqttPort = 1883;
+  String mqttUser, mqttPass, base = "aok_blinds", discovery = "homeassistant";
+};
+
+struct RemoteCfg {
+  bool have[3] = {false, false, false};
+  uint32_t prefix = 0;
+  uint8_t remoteId = 0;
+  uint16_t base[3] = {0, 0, 0};
+  aok::Timings timings;
+  bool listen = true;
+};
+
+struct BlindCfg {
+  String id, name, deviceClass = "shade";
+  uint16_t mask = 1;
+  uint32_t openMs = 30000, closeMs = 30000;
+  bool invert = false;
+  int favourite = -1;
+};
+
+struct BlindState {
+  int position = -1;  // 0 closed .. 100 open, -1 unknown
+  int startPos = -1;
+  int target = -1;
+  Motion motion = Motion::Stopped;
+  uint32_t startMs = 0, durMs = 0;
+  bool autoStop = false;
+  uint32_t lastPublishMs = 0;
+  String lastSource = "none";
+  bool dirty = true;
+};
+
+struct HeardFrame {
+  uint32_t ms = 0;
+  aok::Frame f;
+  bool matched = false;
+  uint16_t repeats = 1;
+};
+
+Pins pins;
+NetCfg net;
+RemoteCfg remote;
+BlindCfg cfg[kMaxBlinds];
+BlindState st[kMaxBlinds];
+size_t blindCount = 0;
+
+Preferences prefs;
+WebServer web(80);
+DNSServer dns;
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+bool radioReady = false, apMode = false, otaReady = false, mdnsReady = false;
+bool learnMode = false, rebootPending = false, discoveryPending = true;
+uint32_t learnStartedMs = 0, rebootAtMs = 0, lastMqttTryMs = 0, lastDiagMs = 0, staStartMs = 0;
+uint32_t lastTxMs = 0, lastRxFlashMs = 0;
+HeardFrame frames[kMaxFrames];
+size_t frameCount = 0, frameHead = 0;
+uint64_t lastPayload = 0;
+uint32_t lastPayloadMs = 0;
+String learnStatus = "idle";
+String lastEventText = "none";
+
+// calibration
+int calIndex = -1;
+Motion calMotion = Motion::Stopped;
+uint32_t calStartMs = 0;
+
+// RX ring buffer filled by the GDO2 edge interrupt
+volatile uint32_t ring[kRingSize];
+volatile uint16_t ringHead = 0, ringTail = 0;
+volatile uint32_t lastEdgeUs = 0, ringOverflow = 0;
+volatile int rxPin = -1;
+aok::Decoder decoder;
+
+// ---------------------------------------------------------------- helpers
+int clampPos(int v) { return v < 0 ? 0 : (v > 100 ? 100 : v); }
+
+String hex(uint64_t v, int digits) {
+  char buf[20];
+  if (digits > 8) snprintf(buf, sizeof(buf), "%0*llX", digits, static_cast<unsigned long long>(v));
+  else snprintf(buf, sizeof(buf), "%0*lX", digits, static_cast<unsigned long>(v));
+  return String(buf);
+}
+
+uint32_t parseHex(const String& s) { return static_cast<uint32_t>(strtoul(s.c_str(), nullptr, 16)); }
+
+String maskText(uint16_t mask) {
+  String out;
+  for (int ch = 1; ch <= 16; ++ch)
+    if (mask & (1u << (ch - 1))) { if (out.length()) out += ","; out += ch; }
+  return out;
+}
+
+const char* motionName(Motion m) { return m == Motion::Opening ? "opening" : (m == Motion::Closing ? "closing" : "stopped"); }
+
+String slug(const String& in) {
+  String out;
+  for (char c : in) {
+    if (isalnum(static_cast<unsigned char>(c))) out += static_cast<char>(tolower(c));
+    else if (out.length() && out[out.length() - 1] != '_') out += '_';
+  }
+  while (out.endsWith("_")) out.remove(out.length() - 1);
+  return out.length() ? out : String("blind");
+}
+
+int findBlind(const String& id) {
+  for (size_t i = 0; i < blindCount; ++i) if (cfg[i].id == id) return static_cast<int>(i);
+  return -1;
+}
+
+bool remoteComplete() { return remote.have[0] && remote.have[1] && remote.have[2]; }
+
+void ledSet(bool on) { if (pins.led >= 0) digitalWrite(pins.led, on ? HIGH : LOW); }
+
+// ---------------------------------------------------------------- persistence
+void saveNet() {
+  JsonDocument d;
+  d["ssid"] = net.ssid; d["pass"] = net.pass; d["host"] = net.hostname; d["admin"] = net.adminPass;
+  d["mh"] = net.mqttHost; d["mp"] = net.mqttPort; d["mu"] = net.mqttUser; d["mw"] = net.mqttPass;
+  d["base"] = net.base; d["disc"] = net.discovery;
+  String s; serializeJson(d, s); prefs.putString("net", s);
+}
+
+void loadNet() {
+  JsonDocument d;
+  if (deserializeJson(d, prefs.getString("net", "{}"))) return;
+  net.ssid = d["ssid"] | ""; net.pass = d["pass"] | ""; net.hostname = d["host"] | "aok-blinds";
+  net.adminPass = d["admin"] | ""; net.mqttHost = d["mh"] | ""; net.mqttPort = d["mp"] | 1883;
+  net.mqttUser = d["mu"] | ""; net.mqttPass = d["mw"] | ""; net.base = d["base"] | "aok_blinds";
+  net.discovery = d["disc"] | "homeassistant";
+}
+
+void savePins() {
+  JsonDocument d;
+  d["sck"] = pins.sck; d["miso"] = pins.miso; d["mosi"] = pins.mosi; d["cs"] = pins.cs;
+  d["gdo0"] = pins.gdo0; d["gdo2"] = pins.gdo2; d["led"] = pins.led; d["mhz"] = pins.mhz; d["pa"] = pins.paDbm;
+  String s; serializeJson(d, s); prefs.putString("pins", s);
+}
+
+void loadPins() {
+  JsonDocument d;
+  if (deserializeJson(d, prefs.getString("pins", "{}"))) return;
+  pins.sck = d["sck"] | pins.sck; pins.miso = d["miso"] | pins.miso; pins.mosi = d["mosi"] | pins.mosi;
+  pins.cs = d["cs"] | pins.cs; pins.gdo0 = d["gdo0"] | pins.gdo0; pins.gdo2 = d["gdo2"] | pins.gdo2;
+  pins.led = d["led"] | pins.led; pins.mhz = d["mhz"] | pins.mhz; pins.paDbm = d["pa"] | pins.paDbm;
+}
+
+void remoteToJson(JsonObject o) {
+  o["prefix"] = hex(remote.prefix, 6);
+  o["remote_id"] = hex(remote.remoteId, 2);
+  o["open"] = remote.have[0] ? hex(remote.base[0], 4) : "";
+  o["close"] = remote.have[1] ? hex(remote.base[1], 4) : "";
+  o["stop"] = remote.have[2] ? hex(remote.base[2], 4) : "";
+  o["listen"] = remote.listen;
+  JsonObject t = o["timings"].to<JsonObject>();
+  t["short"] = remote.timings.shortUs; t["long"] = remote.timings.longUs;
+  t["sync_high"] = remote.timings.syncHighUs; t["sync_low"] = remote.timings.syncLowUs;
+  t["gap"] = remote.timings.gapUs; t["repeats"] = remote.timings.repeats;
+}
+
+void remoteFromJson(JsonObjectConst o) {
+  if (o["prefix"].is<const char*>()) remote.prefix = parseHex(o["prefix"].as<String>()) & 0xFFFFFF;
+  if (o["remote_id"].is<const char*>()) remote.remoteId = parseHex(o["remote_id"].as<String>()) & 0xFF;
+  const char* keys[3] = {"open", "close", "stop"};
+  for (int a = 0; a < 3; ++a) {
+    if (!o[keys[a]].is<const char*>()) continue;
+    String v = o[keys[a]].as<String>();
+    remote.have[a] = v.length() > 0;
+    remote.base[a] = remote.have[a] ? parseHex(v) : 0;
+  }
+  if (o["listen"].is<bool>()) remote.listen = o["listen"];
+  JsonObjectConst t = o["timings"];
+  if (!t.isNull()) {
+    remote.timings.shortUs = t["short"] | remote.timings.shortUs;
+    remote.timings.longUs = t["long"] | remote.timings.longUs;
+    remote.timings.syncHighUs = t["sync_high"] | remote.timings.syncHighUs;
+    remote.timings.syncLowUs = t["sync_low"] | remote.timings.syncLowUs;
+    remote.timings.gapUs = t["gap"] | remote.timings.gapUs;
+    remote.timings.repeats = t["repeats"] | remote.timings.repeats;
+  }
+}
+
+void saveRemote() {
+  JsonDocument d; remoteToJson(d.to<JsonObject>());
+  String s; serializeJson(d, s); prefs.putString("remote", s);
+}
+
+void loadRemote() {
+  JsonDocument d;
+  if (deserializeJson(d, prefs.getString("remote", "{}"))) return;
+  remoteFromJson(d.as<JsonObjectConst>());
+}
+
+void blindToJson(size_t i, JsonObject o) {
+  o["id"] = cfg[i].id; o["name"] = cfg[i].name; o["channels"] = maskText(cfg[i].mask);
+  o["open_ms"] = cfg[i].openMs; o["close_ms"] = cfg[i].closeMs; o["invert"] = cfg[i].invert;
+  o["favourite"] = cfg[i].favourite; o["device_class"] = cfg[i].deviceClass;
+}
+
+uint16_t parseChannels(const String& text) {
+  uint16_t mask = 0; int value = 0; bool any = false;
+  for (size_t k = 0; k <= text.length(); ++k) {
+    char c = k < text.length() ? text[k] : ',';
+    if (isdigit(static_cast<unsigned char>(c))) { value = value * 10 + (c - '0'); any = true; }
+    else { if (any && value >= 1 && value <= 16) mask |= 1u << (value - 1); value = 0; any = false; }
+  }
+  return mask;
+}
+
+bool blindsFromJson(JsonArrayConst arr, String& err) {
+  BlindCfg next[kMaxBlinds];
+  size_t n = 0;
+  for (JsonObjectConst o : arr) {
+    if (n >= kMaxBlinds) { err = "maximum 16 blinds"; return false; }
+    BlindCfg b;
+    b.name = o["name"] | "";
+    b.name.trim();
+    if (!b.name.length()) { err = "every blind needs a name"; return false; }
+    b.id = o["id"] | "";
+    if (!b.id.length()) b.id = slug(b.name);
+    b.id = slug(b.id);
+    for (size_t k = 0; k < n; ++k) if (next[k].id == b.id) { b.id += "_"; b.id += n; }
+    b.mask = o["channels"].is<const char*>() ? parseChannels(o["channels"].as<String>()) : (o["mask"] | 0);
+    if (!b.mask) { err = b.name + ": choose at least one channel (1-16)"; return false; }
+    b.openMs = constrain(static_cast<uint32_t>(o["open_ms"] | 30000), 1000u, 300000u);
+    b.closeMs = constrain(static_cast<uint32_t>(o["close_ms"] | 30000), 1000u, 300000u);
+    b.invert = o["invert"] | false;
+    b.favourite = o["favourite"] | -1;
+    if (b.favourite > 100) b.favourite = 100;
+    b.deviceClass = o["device_class"] | "shade";
+    next[n++] = b;
+  }
+  // keep runtime state for blinds that still exist
+  BlindState nextState[kMaxBlinds];
+  for (size_t i = 0; i < n; ++i) {
+    int old = findBlind(next[i].id);
+    if (old >= 0) nextState[i] = st[old];
+    nextState[i].dirty = true;
+  }
+  for (size_t i = 0; i < n; ++i) { cfg[i] = next[i]; st[i] = nextState[i]; }
+  blindCount = n;
+  return true;
+}
+
+void saveBlinds() {
+  JsonDocument d; JsonArray a = d.to<JsonArray>();
+  for (size_t i = 0; i < blindCount; ++i) blindToJson(i, a.add<JsonObject>());
+  String s; serializeJson(d, s); prefs.putString("blinds", s);
+}
+
+void loadBlinds() {
+  JsonDocument d; String err;
+  if (deserializeJson(d, prefs.getString("blinds", "[]"))) return;
+  blindsFromJson(d.as<JsonArrayConst>(), err);
+}
+
+void savePositions() {
+  JsonDocument d;
+  for (size_t i = 0; i < blindCount; ++i) if (st[i].motion == Motion::Stopped) d[cfg[i].id] = st[i].position;
+  String s; serializeJson(d, s);
+  if (s != prefs.getString("pos", "")) prefs.putString("pos", s);
+}
+
+void loadPositions() {
+  JsonDocument d;
+  if (deserializeJson(d, prefs.getString("pos", "{}"))) return;
+  for (size_t i = 0; i < blindCount; ++i) {
+    int p = d[cfg[i].id] | -1;
+    st[i].position = st[i].startPos = st[i].target = p < 0 ? -1 : clampPos(p);
+    st[i].lastSource = p < 0 ? "none" : "restored";
+  }
+}
+
+// ---------------------------------------------------------------- radio
+void IRAM_ATTR onEdge() {
+  const uint32_t now = micros();
+  const uint32_t dur = now - lastEdgeUs;
+  lastEdgeUs = now;
+  if (dur < 100) return;  // glitch filter
+  const bool levelNow = digitalRead(rxPin);
+  const uint32_t v = (dur > 0x7FFFFFFF ? 0x7FFFFFFF : dur) | (levelNow ? 0 : 0x80000000u);  // level before the edge
+  const uint16_t next = (ringHead + 1) & (kRingSize - 1);
+  if (next == ringTail) { ringOverflow++; return; }
+  ring[ringHead] = v;
+  ringHead = next;
+}
+
+void rxStart() {
+  if (!radioReady) return;
+  ELECHOUSE_cc1101.SetRx(pins.mhz);
+  decoder.clear();
+  rxPin = pins.gdo2;
+  pinMode(pins.gdo2, INPUT);
+  lastEdgeUs = micros();
+  attachInterrupt(digitalPinToInterrupt(pins.gdo2), onEdge, CHANGE);
+}
+
+void rxStop() {
+  if (pins.gdo2 >= 0) detachInterrupt(digitalPinToInterrupt(pins.gdo2));
+}
+
+void setupRadio() {
+  pinMode(pins.gdo0, OUTPUT);
+  digitalWrite(pins.gdo0, LOW);
+  ELECHOUSE_cc1101.setSpiPin(pins.sck, pins.miso, pins.mosi, pins.cs);
+  ELECHOUSE_cc1101.Init();
+  radioReady = ELECHOUSE_cc1101.getCC1101();
+  if (!radioReady) { Serial.println("CC1101 not detected — check wiring"); return; }
+  ELECHOUSE_cc1101.setCCMode(0);       // asynchronous serial mode (raw OOK on the GDO pins)
+  ELECHOUSE_cc1101.setModulation(2);   // ASK/OOK
+  ELECHOUSE_cc1101.setMHZ(pins.mhz);
+  ELECHOUSE_cc1101.setPA(pins.paDbm);
+  ELECHOUSE_cc1101.setRxBW(270.0f);
+  ELECHOUSE_cc1101.setDRate(4.8f);
+  ELECHOUSE_cc1101.setSyncMode(0);
+  ELECHOUSE_cc1101.setCrc(false);
+  ELECHOUSE_cc1101.setPktFormat(3);
+  // GDO2 = received data out; GDO0 = high impedance in RX (it becomes the TX data input when transmitting)
+  ELECHOUSE_cc1101.SpiWriteReg(0x00, 0x0D);  // IOCFG2
+  ELECHOUSE_cc1101.SpiWriteReg(0x02, 0x2E);  // IOCFG0
+  Serial.printf("CC1101 ready at %.2f MHz\n", pins.mhz);
+  rxStart();
+}
+
+bool transmitPayload(uint64_t payload, String& err) {
+  if (!radioReady) { err = "CC1101 radio not detected"; return false; }
+  uint16_t pulses[aok::kFramePulses];
+  const size_t n = aok::encodeFrame(payload, remote.timings, pulses, aok::kFramePulses);
+  rxStop();
+  ELECHOUSE_cc1101.SetTx(pins.mhz);
+  pinMode(pins.gdo0, OUTPUT);
+  ledSet(true);
+  for (uint8_t r = 0; r < remote.timings.repeats; ++r) {
+    bool level = true;
+    for (size_t k = 0; k < n; ++k) {
+      digitalWrite(pins.gdo0, level ? HIGH : LOW);
+      delayMicroseconds(pulses[k]);
+      level = !level;
+    }
+    digitalWrite(pins.gdo0, LOW);
+    delayMicroseconds(remote.timings.gapUs);
+  }
+  ledSet(false);
+  lastTxMs = millis();
+  rxStart();
+  return true;
+}
+
+bool sendAction(uint16_t mask, aok::Action action, String& err) {
+  const int a = static_cast<int>(action);
+  if (a > 2) { err = "unknown action"; return false; }
+  if (!remote.have[a]) { err = String("remote not learned yet: ") + aok::actionName(action); return false; }
+  const uint64_t payload = aok::makePayload(remote.prefix, remote.remoteId, mask, remote.base[a]);
+  Serial.printf("TX %s channels=%s payload=%s\n", aok::actionName(action), maskText(mask).c_str(), hex(payload, 16).c_str());
+  return transmitPayload(payload, err);
+}
+
+// ---------------------------------------------------------------- position model
+uint32_t travelMs(size_t i, Motion m) { return max<uint32_t>(m == Motion::Closing ? cfg[i].closeMs : cfg[i].openMs, 1000); }
+
+int estimate(size_t i) {
+  const BlindState& s = st[i];
+  if (s.motion == Motion::Stopped || s.startPos < 0) return s.position;
+  const uint32_t elapsed = millis() - s.startMs;
+  int delta = static_cast<int>((static_cast<uint64_t>(elapsed) * 100) / travelMs(i, s.motion));
+  if (delta > 100) delta = 100;
+  return clampPos(s.startPos + (s.motion == Motion::Opening ? delta : -delta));
+}
+
+// physical direction the blind moves for an RF action (some motors are wired reversed)
+Motion motionFor(size_t i, aok::Action rf) {
+  if (rf == aok::Action::Open) return cfg[i].invert ? Motion::Closing : Motion::Opening;
+  if (rf == aok::Action::Close) return cfg[i].invert ? Motion::Opening : Motion::Closing;
+  return Motion::Stopped;
+}
+
+aok::Action rfFor(size_t i, Motion m) {
+  if (m == Motion::Opening) return cfg[i].invert ? aok::Action::Close : aok::Action::Open;
+  return cfg[i].invert ? aok::Action::Open : aok::Action::Close;
+}
+
+void beginMotion(size_t i, Motion m, int target, bool autoStop, const String& source) {
+  BlindState& s = st[i];
+  int cur = estimate(i);
+  if (cur < 0) cur = (m == Motion::Opening) ? 0 : 100;  // unknown: assume the far end so the full run is covered
+  s.position = cur;
+  s.startPos = cur;
+  s.target = clampPos(target);
+  s.motion = m;
+  s.startMs = millis();
+  s.durMs = static_cast<uint32_t>(abs(s.target - cur)) * travelMs(i, m) / 100;
+  if (!autoStop) s.durMs += 1500;  // endpoint runs: motor stops itself at its limit
+  s.autoStop = autoStop;
+  s.lastSource = source;
+  s.dirty = true;
+}
+
+void haltMotion(size_t i, const String& source) {
+  BlindState& s = st[i];
+  const int cur = estimate(i);
+  s.position = cur;
+  s.startPos = cur;
+  s.target = cur;
+  s.motion = Motion::Stopped;
+  s.autoStop = false;
+  s.lastSource = source;
+  s.dirty = true;
+}
+
+// Apply an RF action heard or sent on `mask` to every blind whose channels are all included.
+void applyAction(uint16_t mask, aok::Action action, const String& source, int commander, int commanderTarget) {
+  for (size_t j = 0; j < blindCount; ++j) {
+    if ((cfg[j].mask & ~mask) != 0) continue;
+    if (action == aok::Action::Stop) { haltMotion(j, source); continue; }
+    const Motion m = motionFor(j, action);
+    if (static_cast<int>(j) == commander && commanderTarget > 0 && commanderTarget < 100)
+      beginMotion(j, m, commanderTarget, true, source);
+    else
+      beginMotion(j, m, m == Motion::Opening ? 100 : 0, false, source);
+  }
+  savePositions();
+}
+
+bool groupPosition(size_t g, int& pos, Motion& motion);
+
+bool moveTo(size_t i, int target, const String& source, String& err) {
+  target = clampPos(target);
+  int gp; Motion gm;
+  if (__builtin_popcount(cfg[i].mask) > 1 && groupPosition(i, gp, gm) && gm == Motion::Stopped && st[i].motion == Motion::Stopped) {
+    st[i].position = st[i].startPos = gp;  // a group starts from where its members actually are
+  }
+  int cur = estimate(i);
+  if (cur < 0 && target > 0 && target < 100) {
+    err = "position unknown — open or close fully once (or use Mark open/closed)";
+    return false;
+  }
+  if (cur == target && st[i].motion == Motion::Stopped) { st[i].dirty = true; return true; }
+  if (cur < 0) cur = target == 100 ? 0 : 100;
+  const Motion m = target > cur ? Motion::Opening : Motion::Closing;
+  if (target > 0 && target < 100 && !remote.have[2]) { err = "learn the Stop button first"; return false; }
+  if (!sendAction(cfg[i].mask, rfFor(i, m), err)) return false;
+  applyAction(cfg[i].mask, rfFor(i, m), source, static_cast<int>(i), target);
+  return true;
+}
+
+bool stopBlind(size_t i, const String& source, String& err) {
+  if (!sendAction(cfg[i].mask, aok::Action::Stop, err)) return false;
+  applyAction(cfg[i].mask, aok::Action::Stop, source, static_cast<int>(i), -1);
+  return true;
+}
+
+// members of a group = other blinds whose channels are a subset of the group's channels
+bool groupPosition(size_t g, int& pos, Motion& motion) {
+  int sum = 0, count = 0;
+  bool opening = false, closing = false;
+  for (size_t j = 0; j < blindCount; ++j) {
+    if (j == g || (cfg[j].mask & ~cfg[g].mask) != 0 || cfg[j].mask == cfg[g].mask) continue;
+    const int p = estimate(j);
+    if (p < 0) return false;
+    sum += p; count++;
+    opening |= st[j].motion == Motion::Opening;
+    closing |= st[j].motion == Motion::Closing;
+  }
+  if (!count) return false;
+  pos = (sum + count / 2) / count;
+  motion = opening && !closing ? Motion::Opening : (closing && !opening ? Motion::Closing : (opening ? Motion::Opening : Motion::Stopped));
+  return true;
+}
+
+void displayState(size_t i, int& pos, Motion& motion) {
+  pos = estimate(i);
+  motion = st[i].motion;
+  int gp; Motion gm;
+  if (__builtin_popcount(cfg[i].mask) > 1 && groupPosition(i, gp, gm)) { pos = gp; motion = gm; }
+}
+
+// ---------------------------------------------------------------- MQTT
+String topic(const String& suffix) { return net.base + "/" + suffix; }
+String blindTopic(size_t i, const char* suffix) { return net.base + "/" + cfg[i].id + "/" + suffix; }
+String nodeId() { return net.base; }
+
+void deviceJson(JsonObject o) {
+  JsonObject dev = o["device"].to<JsonObject>();
+  dev["identifiers"].to<JsonArray>().add(nodeId());
+  dev["name"] = "A-OK Blind Bridge";
+  dev["manufacturer"] = "DIY";
+  dev["model"] = "ESP32 + CC1101";
+  dev["sw_version"] = FW_VERSION;
+  if (WiFi.status() == WL_CONNECTED) dev["configuration_url"] = String("http://") + WiFi.localIP().toString();
+  o["availability_topic"] = topic("status");
+}
+
+void publishJson(const String& t, JsonDocument& d, bool retain = true) {
+  String s; serializeJson(d, s);
+  mqtt.publish(t.c_str(), s.c_str(), retain);
+}
+
+void publishDiscovery() {
+  const String disc = net.discovery;
+  JsonDocument ids;
+  for (size_t i = 0; i < blindCount; ++i) {
+    const String uid = nodeId() + "_" + cfg[i].id;
+    {
+      JsonDocument d;
+      d["name"] = nullptr;  // entity takes the device name below
+      d["unique_id"] = uid;
+      d["default_entity_id"] = String("cover.") + cfg[i].id;
+      d["command_topic"] = blindTopic(i, "set");
+      d["set_position_topic"] = blindTopic(i, "set_position");
+      d["position_topic"] = blindTopic(i, "position");
+      d["state_topic"] = blindTopic(i, "state");
+      d["json_attributes_topic"] = blindTopic(i, "attributes");
+      d["payload_open"] = "OPEN"; d["payload_close"] = "CLOSE"; d["payload_stop"] = "STOP";
+      d["position_open"] = 100; d["position_closed"] = 0;
+      d["optimistic"] = false;
+      d["device_class"] = cfg[i].deviceClass;
+      deviceJson(d.as<JsonObject>());
+      // each blind is its own device so it can sit in its own area
+      JsonObject dev = d["device"];
+      dev["identifiers"][0] = uid;
+      dev["name"] = cfg[i].name;
+      dev["via_device"] = nodeId();
+      dev["model"] = String("A-OK motor · channel ") + maskText(cfg[i].mask);
+      publishJson(disc + "/cover/" + uid + "/config", d);
+    }
+    struct Btn { const char* key; const char* name; const char* payload; const char* icon; };
+    const Btn btns[] = {
+      {"favourite", "Favourite position", "FAVOURITE", "mdi:star"},
+      {"mark_open", "Mark as open", "SYNC_OPEN", "mdi:arrow-collapse-up"},
+      {"mark_closed", "Mark as closed", "SYNC_CLOSE", "mdi:arrow-collapse-down"},
+    };
+    for (const Btn& b : btns) {
+      const String buid = uid + "_" + b.key;
+      const String t = disc + "/button/" + buid + "/config";
+      if (strcmp(b.key, "favourite") == 0 && cfg[i].favourite < 0) { mqtt.publish(t.c_str(), "", true); continue; }
+      JsonDocument d;
+      d["name"] = b.name; d["unique_id"] = buid; d["command_topic"] = blindTopic(i, "set");
+      d["payload_press"] = b.payload; d["icon"] = b.icon;
+      if (strcmp(b.key, "favourite") != 0) d["entity_category"] = "config";
+      deviceJson(d.as<JsonObject>());
+      JsonObject dev = d["device"];
+      dev["identifiers"][0] = uid; dev["name"] = cfg[i].name; dev["via_device"] = nodeId();
+      publishJson(t, d);
+    }
+    ids.add(cfg[i].id);
+  }
+  // remove entities for blinds that were deleted
+  JsonDocument old;
+  if (!deserializeJson(old, prefs.getString("pubids", "[]"))) {
+    for (JsonVariantConst v : old.as<JsonArrayConst>()) {
+      const String id = v.as<String>();
+      if (findBlind(id) >= 0) continue;
+      const String uid = nodeId() + "_" + id;
+      mqtt.publish((disc + "/cover/" + uid + "/config").c_str(), "", true);
+      for (const char* k : {"favourite", "mark_open", "mark_closed"})
+        mqtt.publish((disc + "/button/" + uid + "_" + k + "/config").c_str(), "", true);
+      for (const char* s : {"state", "position", "attributes", "set", "set_position"})
+        mqtt.publish((net.base + "/" + id + "/" + s).c_str(), "", true);
+    }
+  }
+  String s; serializeJson(ids, s); prefs.putString("pubids", s);
+
+  // bridge entities
+  auto sensor = [&](const char* key, const char* name, const char* unit, const char* devClass, const char* icon, bool diag) {
+    JsonDocument d;
+    d["name"] = name; d["unique_id"] = nodeId() + "_" + key; d["state_topic"] = topic(String("diag/") + key);
+    if (unit) d["unit_of_measurement"] = unit;
+    if (devClass) d["device_class"] = devClass;
+    if (icon) d["icon"] = icon;
+    if (diag) d["entity_category"] = "diagnostic";
+    deviceJson(d.as<JsonObject>());
+    publishJson(disc + "/sensor/" + nodeId() + "_" + key + "/config", d);
+  };
+  sensor("rssi", "Wi-Fi signal", "dBm", "signal_strength", nullptr, true);
+  sensor("uptime", "Uptime", "s", "duration", nullptr, true);
+  sensor("ip", "IP address", nullptr, nullptr, "mdi:ip-network", true);
+  sensor("last_remote", "Last remote press", nullptr, nullptr, "mdi:remote", false);
+  {
+    JsonDocument d;
+    d["name"] = "CC1101 radio"; d["unique_id"] = nodeId() + "_radio"; d["state_topic"] = topic("diag/radio");
+    d["payload_on"] = "ON"; d["payload_off"] = "OFF"; d["device_class"] = "connectivity"; d["entity_category"] = "diagnostic";
+    deviceJson(d.as<JsonObject>());
+    publishJson(disc + "/binary_sensor/" + nodeId() + "_radio/config", d);
+  }
+  {
+    JsonDocument d;
+    d["name"] = "Remote button"; d["unique_id"] = nodeId() + "_remote_event"; d["state_topic"] = topic("remote/event");
+    JsonArray et = d["event_types"].to<JsonArray>();
+    et.add("open"); et.add("close"); et.add("stop");
+    d["icon"] = "mdi:remote";
+    deviceJson(d.as<JsonObject>());
+    publishJson(disc + "/event/" + nodeId() + "_remote_event/config", d);
+  }
+  {
+    JsonDocument d;
+    d["name"] = "Learn remote"; d["unique_id"] = nodeId() + "_learn"; d["command_topic"] = topic("learn/set");
+    d["payload_press"] = "START"; d["icon"] = "mdi:school"; d["entity_category"] = "config";
+    deviceJson(d.as<JsonObject>());
+    publishJson(disc + "/button/" + nodeId() + "_learn/config", d);
+  }
+  discoveryPending = false;
+}
+
+void publishBlind(size_t i) {
+  if (!mqtt.connected()) return;
+  int pos; Motion m;
+  displayState(i, pos, m);
+  const char* state = m == Motion::Opening ? "opening" : m == Motion::Closing ? "closing" : (pos < 0 ? "stopped" : (pos == 0 ? "closed" : "open"));
+  mqtt.publish(blindTopic(i, "state").c_str(), state, true);
+  if (pos >= 0) mqtt.publish(blindTopic(i, "position").c_str(), String(pos).c_str(), true);
+  JsonDocument d;
+  d["channels"] = maskText(cfg[i].mask);
+  d["position_known"] = pos >= 0;
+  d["target_position"] = st[i].target;
+  d["last_source"] = st[i].lastSource;
+  d["open_time_s"] = cfg[i].openMs / 1000.0;
+  d["close_time_s"] = cfg[i].closeMs / 1000.0;
+  d["favourite_position"] = cfg[i].favourite;
+  d["inverted"] = cfg[i].invert;
+  publishJson(blindTopic(i, "attributes"), d);
+  st[i].lastPublishMs = millis();
+  st[i].dirty = false;
+}
+
+void publishDiagnostics() {
+  if (!mqtt.connected()) return;
+  mqtt.publish(topic("diag/rssi").c_str(), String(WiFi.RSSI()).c_str(), true);
+  mqtt.publish(topic("diag/uptime").c_str(), String(millis() / 1000).c_str(), true);
+  mqtt.publish(topic("diag/ip").c_str(), WiFi.localIP().toString().c_str(), true);
+  mqtt.publish(topic("diag/radio").c_str(), radioReady ? "ON" : "OFF", true);
+  mqtt.publish(topic("diag/last_remote").c_str(), lastEventText.c_str(), true);
+  lastDiagMs = millis();
+}
+
+bool handleBlindCommand(size_t i, String cmd, const String& source, String& err);
+
+void onMqtt(char* t, byte* payload, unsigned int len) {
+  String tp(t), msg;
+  msg.reserve(len);
+  for (unsigned int k = 0; k < len; ++k) msg += static_cast<char>(payload[k]);
+  if (!msg.length()) return;
+  if (tp == topic("learn/set")) { learnMode = true; learnStartedMs = millis(); learnStatus = "waiting"; return; }
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (tp == blindTopic(i, "set") || tp == blindTopic(i, "set_position")) {
+      String err;
+      if (!handleBlindCommand(i, msg, "home_assistant", err)) Serial.printf("[%s] %s\n", cfg[i].id.c_str(), err.c_str());
+      return;
+    }
+  }
+}
+
+void ensureMqtt() {
+  if (apMode && WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED || !net.mqttHost.length() || mqtt.connected()) return;
+  if (millis() - lastMqttTryMs < 5000 && lastMqttTryMs) return;
+  lastMqttTryMs = millis();
+  mqtt.setServer(net.mqttHost.c_str(), net.mqttPort);
+  const String clientId = net.base + "_" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
+  const String will = topic("status");
+  bool ok = net.mqttUser.length()
+    ? mqtt.connect(clientId.c_str(), net.mqttUser.c_str(), net.mqttPass.c_str(), will.c_str(), 0, true, "offline")
+    : mqtt.connect(clientId.c_str(), will.c_str(), 0, true, "offline");
+  if (!ok) { Serial.printf("MQTT connect failed state=%d\n", mqtt.state()); return; }
+  Serial.println("MQTT connected");
+  mqtt.publish(will.c_str(), "online", true);
+  mqtt.subscribe(topic("learn/set").c_str());
+  for (size_t i = 0; i < blindCount; ++i) {
+    mqtt.subscribe(blindTopic(i, "set").c_str());
+    mqtt.subscribe(blindTopic(i, "set_position").c_str());
+  }
+  publishDiscovery();
+  for (size_t i = 0; i < blindCount; ++i) publishBlind(i);
+  publishDiagnostics();
+}
+
+// ---------------------------------------------------------------- commands
+bool handleBlindCommand(size_t i, String cmd, const String& source, String& err) {
+  cmd.trim();
+  cmd.toUpperCase();
+  if (cmd == "OPEN") return moveTo(i, 100, source, err);
+  if (cmd == "CLOSE") return moveTo(i, 0, source, err);
+  if (cmd == "STOP") return stopBlind(i, source, err);
+  if (cmd == "FAVOURITE" || cmd == "FAVORITE") {
+    if (cfg[i].favourite < 0) { err = "no favourite position set"; return false; }
+    return moveTo(i, cfg[i].favourite, source, err);
+  }
+  if (cmd == "SYNC_OPEN" || cmd == "SYNC_CLOSE") {
+    const int p = cmd == "SYNC_OPEN" ? 100 : 0;
+    for (size_t j = 0; j < blindCount; ++j) {
+      if ((cfg[j].mask & ~cfg[i].mask) != 0) continue;
+      st[j].motion = Motion::Stopped;
+      st[j].position = st[j].startPos = st[j].target = p;
+      st[j].lastSource = "marked";
+      st[j].dirty = true;
+    }
+    savePositions();
+    return true;
+  }
+  bool numeric = cmd.length() > 0;
+  for (char c : cmd) numeric &= isdigit(static_cast<unsigned char>(c)) != 0;
+  if (numeric) return moveTo(i, cmd.toInt(), source, err);
+  err = String("unknown command: ") + cmd;
+  return false;
+}
+
+void updateMotion() {
+  const uint32_t now = millis();
+  bool anyStopped = false;
+  for (size_t i = 0; i < blindCount; ++i) {
+    BlindState& s = st[i];
+    if (s.motion == Motion::Stopped) continue;
+    if (now - s.lastPublishMs > 1000) s.dirty = true;
+    if (now - s.startMs < s.durMs) continue;
+    const int goal = s.target;
+    if (s.autoStop) {
+      String err;
+      if (sendAction(cfg[i].mask, aok::Action::Stop, err)) {
+        applyAction(cfg[i].mask, aok::Action::Stop, s.lastSource, static_cast<int>(i), -1);
+        s.position = s.startPos = s.target = goal;
+      } else {
+        haltMotion(i, "auto_stop_failed");  // keep the time-based estimate
+      }
+    } else {
+      haltMotion(i, s.lastSource);
+      s.position = s.startPos = s.target = goal;  // endpoint reached: motor stops at its limit
+    }
+    s.dirty = true;
+    anyStopped = true;
+  }
+  if (anyStopped) savePositions();
+  // groups follow their members
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (__builtin_popcount(cfg[i].mask) <= 1) continue;
+    for (size_t j = 0; j < blindCount; ++j)
+      if (j != i && (cfg[j].mask & ~cfg[i].mask) == 0 && st[j].dirty) { st[i].dirty = true; break; }
+  }
+  for (size_t i = 0; i < blindCount; ++i) if (st[i].dirty) publishBlind(i);
+}
+
+// ---------------------------------------------------------------- received frames
+void recordFrame(const aok::Frame& f, bool matched) {
+  if (frameCount && frames[(frameHead + kMaxFrames - 1) % kMaxFrames].f.payload == f.payload &&
+      millis() - frames[(frameHead + kMaxFrames - 1) % kMaxFrames].ms < 3000) {
+    HeardFrame& last = frames[(frameHead + kMaxFrames - 1) % kMaxFrames];
+    last.repeats++;
+    last.ms = millis();
+    return;
+  }
+  frames[frameHead] = HeardFrame{millis(), f, matched, 1};
+  frameHead = (frameHead + 1) % kMaxFrames;
+  if (frameCount < kMaxFrames) frameCount++;
+}
+
+void onPayload(uint64_t payload) {
+  const uint32_t now = millis();
+  const aok::Frame f = aok::splitPayload(payload);
+  const bool repeat = payload == lastPayload && now - lastPayloadMs < kDedupeMs;
+  lastPayload = payload;
+  lastPayloadMs = now;
+  const bool matched = (remote.have[0] || remote.have[1] || remote.have[2]) && f.prefix == remote.prefix && f.remoteId == remote.remoteId;
+  recordFrame(f, matched);
+  if (repeat) return;
+  lastRxFlashMs = now;
+  if (f.action == aok::Action::Unknown || !f.mask) return;
+
+  if (learnMode) {
+    const bool sameRemote = f.prefix == remote.prefix && f.remoteId == remote.remoteId;
+    if (!sameRemote) for (bool& h : remote.have) h = false;
+    remote.prefix = f.prefix;
+    remote.remoteId = f.remoteId;
+    const int a = static_cast<int>(f.action);
+    remote.base[a] = aok::deriveBase(f.remoteId, f.mask, f.command);
+    remote.have[a] = true;
+    saveRemote();
+    learnStatus = String("learned ") + aok::actionName(f.action) + " from remote " + hex(f.remoteId, 2) + " (channel " + maskText(f.mask) + ")";
+    if (remoteComplete()) { learnMode = false; learnStatus = "complete"; }
+    Serial.println(learnStatus);
+    return;
+  }
+
+  if (!matched) return;
+  lastEventText = String(aok::actionName(f.action)) + " · channel " + maskText(f.mask);
+  if (mqtt.connected()) {
+    JsonDocument d;
+    d["event_type"] = aok::actionName(f.action);
+    d["channels"] = maskText(f.mask);
+    publishJson(topic("remote/event"), d, false);
+    mqtt.publish(topic("diag/last_remote").c_str(), lastEventText.c_str(), true);
+  }
+  if (remote.listen) applyAction(f.mask, f.action, "hand_remote", -1, -1);
+}
+
+void pollRadio() {
+  uint64_t payload;
+  uint16_t budget = 512;
+  while (ringTail != ringHead && budget--) {
+    const uint32_t v = ring[ringTail];
+    ringTail = (ringTail + 1) & (kRingSize - 1);
+    if (decoder.feed(v & 0x7FFFFFFF, (v & 0x80000000u) != 0, payload)) onPayload(payload);
+  }
+  if (learnMode && millis() - learnStartedMs > 120000) { learnMode = false; learnStatus = remoteComplete() ? "complete" : "timed out"; }
+}
+
+// ---------------------------------------------------------------- web
+bool authed() {
+  if (!net.adminPass.length()) return true;
+  if (web.authenticate("admin", net.adminPass.c_str())) return true;
+  web.requestAuthentication(BASIC_AUTH, "A-OK Blind Bridge");
+  return false;
+}
+
+void sendJson(JsonDocument& d, int code = 200) {
+  String s; serializeJson(d, s);
+  web.send(code, "application/json", s);
+}
+
+void sendError(const String& msg, int code = 400) {
+  JsonDocument d; d["ok"] = false; d["error"] = msg; sendJson(d, code);
+}
+
+void sendOk() { JsonDocument d; d["ok"] = true; sendJson(d); }
+
+bool bodyJson(JsonDocument& d) {
+  if (!web.hasArg("plain") || deserializeJson(d, web.arg("plain"))) { sendError("invalid JSON body"); return false; }
+  return true;
+}
+
+void handleState() {
+  JsonDocument d;
+  d["fw"] = FW_VERSION; d["uptime"] = millis() / 1000; d["heap"] = ESP.getFreeHeap();
+  JsonObject w = d["wifi"].to<JsonObject>();
+  w["connected"] = WiFi.status() == WL_CONNECTED; w["ssid"] = net.ssid; w["ip"] = WiFi.localIP().toString();
+  w["rssi"] = WiFi.RSSI(); w["ap"] = apMode; w["hostname"] = net.hostname;
+  JsonObject m = d["mqtt"].to<JsonObject>();
+  m["configured"] = net.mqttHost.length() > 0; m["connected"] = mqtt.connected(); m["state"] = mqtt.state();
+  JsonObject r = d["radio"].to<JsonObject>();
+  r["ready"] = radioReady; r["overflow"] = static_cast<uint32_t>(ringOverflow); r["mhz"] = pins.mhz;
+  JsonObject rm = d["remote"].to<JsonObject>();
+  remoteToJson(rm);
+  rm["complete"] = remoteComplete(); rm["learning"] = learnMode; rm["learn_status"] = learnStatus;
+  JsonArray bl = d["blinds"].to<JsonArray>();
+  for (size_t i = 0; i < blindCount; ++i) {
+    JsonObject o = bl.add<JsonObject>();
+    blindToJson(i, o);
+    int pos; Motion mo; displayState(i, pos, mo);
+    o["position"] = pos; o["motion"] = motionName(mo); o["target"] = st[i].target; o["source"] = st[i].lastSource;
+    o["group"] = __builtin_popcount(cfg[i].mask) > 1;
+  }
+  JsonArray fr = d["frames"].to<JsonArray>();
+  for (size_t k = 0; k < frameCount; ++k) {
+    const HeardFrame& h = frames[(frameHead + kMaxFrames - 1 - k) % kMaxFrames];
+    JsonObject o = fr.add<JsonObject>();
+    o["ago_s"] = (millis() - h.ms) / 1000; o["payload"] = hex(h.f.payload, 16); o["remote_id"] = hex(h.f.remoteId, 2);
+    o["prefix"] = hex(h.f.prefix, 6); o["channels"] = maskText(h.f.mask); o["action"] = aok::actionName(h.f.action);
+    o["matched"] = h.matched; o["repeats"] = h.repeats;
+  }
+  JsonObject c = d["calibration"].to<JsonObject>();
+  c["active"] = calIndex >= 0;
+  if (calIndex >= 0) { c["id"] = cfg[calIndex].id; c["direction"] = motionName(calMotion); c["elapsed_ms"] = millis() - calStartMs; }
+  sendJson(d);
+}
+
+void handleConfigGet() {
+  if (!authed()) return;
+  JsonDocument d;
+  JsonObject n = d["network"].to<JsonObject>();
+  n["ssid"] = net.ssid; n["pass_set"] = net.pass.length() > 0; n["hostname"] = net.hostname;
+  n["admin_set"] = net.adminPass.length() > 0;
+  n["mqtt_host"] = net.mqttHost; n["mqtt_port"] = net.mqttPort; n["mqtt_user"] = net.mqttUser;
+  n["mqtt_pass_set"] = net.mqttPass.length() > 0; n["base_topic"] = net.base; n["discovery_prefix"] = net.discovery;
+  JsonObject p = d["pins"].to<JsonObject>();
+  p["sck"] = pins.sck; p["miso"] = pins.miso; p["mosi"] = pins.mosi; p["cs"] = pins.cs;
+  p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm;
+  remoteToJson(d["remote"].to<JsonObject>());
+  JsonArray b = d["blinds"].to<JsonArray>();
+  for (size_t i = 0; i < blindCount; ++i) blindToJson(i, b.add<JsonObject>());
+  sendJson(d);
+}
+
+void scheduleReboot(uint32_t ms = 1500) { rebootPending = true; rebootAtMs = millis() + ms; }
+
+void handleNetworkPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  bool reboot = false;
+  if (d["ssid"].is<const char*>()) { String v = d["ssid"].as<String>(); if (v != net.ssid) { net.ssid = v; reboot = true; } }
+  if (d["pass"].is<const char*>() && d["pass"].as<String>().length()) { net.pass = d["pass"].as<String>(); reboot = true; }
+  if (d["hostname"].is<const char*>()) { String v = slug(d["hostname"].as<String>()); v.replace("_", "-"); if (v != net.hostname) { net.hostname = v; reboot = true; } }
+  if (d["admin_pass"].is<const char*>()) net.adminPass = d["admin_pass"].as<String>();
+  if (d["mqtt_host"].is<const char*>()) net.mqttHost = d["mqtt_host"].as<String>();
+  if (d["mqtt_port"].is<int>()) net.mqttPort = d["mqtt_port"];
+  if (d["mqtt_user"].is<const char*>()) net.mqttUser = d["mqtt_user"].as<String>();
+  if (d["mqtt_pass"].is<const char*>() && d["mqtt_pass"].as<String>().length()) net.mqttPass = d["mqtt_pass"].as<String>();
+  if (d["base_topic"].is<const char*>() && d["base_topic"].as<String>().length()) net.base = slug(d["base_topic"].as<String>());
+  if (d["discovery_prefix"].is<const char*>() && d["discovery_prefix"].as<String>().length()) net.discovery = d["discovery_prefix"].as<String>();
+  saveNet();
+  if (mqtt.connected()) mqtt.disconnect();
+  lastMqttTryMs = 0;
+  if (reboot) scheduleReboot(2000);
+  JsonDocument r; r["ok"] = true; r["rebooting"] = reboot; sendJson(r);
+}
+
+void handlePinsPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  pins.sck = d["sck"] | pins.sck; pins.miso = d["miso"] | pins.miso; pins.mosi = d["mosi"] | pins.mosi;
+  pins.cs = d["cs"] | pins.cs; pins.gdo0 = d["gdo0"] | pins.gdo0; pins.gdo2 = d["gdo2"] | pins.gdo2;
+  pins.led = d["led"] | pins.led; pins.mhz = d["mhz"] | pins.mhz; pins.paDbm = d["pa_dbm"] | pins.paDbm;
+  savePins();
+  scheduleReboot(1500);
+  JsonDocument r; r["ok"] = true; r["rebooting"] = true; sendJson(r);
+}
+
+void handleRemotePost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  const String action = d["action"] | "";
+  if (action == "learn") { learnMode = true; learnStartedMs = millis(); learnStatus = "waiting"; }
+  else if (action == "cancel") { learnMode = false; learnStatus = "cancelled"; }
+  else if (action == "forget") { for (bool& h : remote.have) h = false; remote.prefix = 0; remote.remoteId = 0; saveRemote(); learnStatus = "idle"; }
+  else if (action == "save") { remoteFromJson(d["remote"].as<JsonObjectConst>()); saveRemote(); }
+  else { sendError("unknown action"); return; }
+  sendOk();
+}
+
+void handleBlindsPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  String err;
+  if (!blindsFromJson(d["blinds"].as<JsonArrayConst>(), err)) { sendError(err); return; }
+  saveBlinds();
+  savePositions();
+  if (mqtt.connected()) mqtt.disconnect();  // reconnect re-subscribes and republishes discovery
+  lastMqttTryMs = 0;
+  sendOk();
+}
+
+void handleCommandPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  const int i = findBlind(d["id"] | "");
+  if (i < 0) { sendError("unknown blind"); return; }
+  String err;
+  if (!handleBlindCommand(i, d["cmd"].as<String>(), "web", err)) { sendError(err); return; }
+  sendOk();
+}
+
+void handleTestPost() {  // send a raw action on any channel(s) — handy before blinds are set up
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  const uint16_t mask = parseChannels(d["channels"] | "");
+  const String a = d["action"] | "";
+  const aok::Action act = a == "open" ? aok::Action::Open : a == "close" ? aok::Action::Close : a == "stop" ? aok::Action::Stop : aok::Action::Unknown;
+  String err;
+  if (!mask) { sendError("choose a channel"); return; }
+  if (!sendAction(mask, act, err)) { sendError(err); return; }
+  applyAction(mask, act, "test", -1, -1);
+  sendOk();
+}
+
+void handleCalibratePost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  const String action = d["action"] | "";
+  String err;
+  if (action == "start_close" || action == "start_open") {
+    const int i = findBlind(d["id"] | "");
+    if (i < 0) { sendError("unknown blind"); return; }
+    calMotion = action == "start_open" ? Motion::Opening : Motion::Closing;
+    if (!sendAction(cfg[i].mask, rfFor(i, calMotion), err)) { sendError(err); return; }
+    calIndex = i;
+    calStartMs = millis();
+    applyAction(cfg[i].mask, rfFor(i, calMotion), "calibration", -1, -1);
+    sendOk();
+  } else if (action == "done" && calIndex >= 0) {
+    const uint32_t ms = millis() - calStartMs;
+    if (calMotion == Motion::Opening) cfg[calIndex].openMs = ms; else cfg[calIndex].closeMs = ms;
+    const int p = calMotion == Motion::Opening ? 100 : 0;
+    st[calIndex].motion = Motion::Stopped;
+    st[calIndex].position = st[calIndex].startPos = st[calIndex].target = p;
+    st[calIndex].dirty = true;
+    saveBlinds();
+    savePositions();
+    JsonDocument r; r["ok"] = true; r["measured_ms"] = ms; sendJson(r);
+    calIndex = -1;
+  } else if (action == "cancel") {
+    if (calIndex >= 0) stopBlind(calIndex, "calibration", err);
+    calIndex = -1;
+    sendOk();
+  } else sendError("unknown action");
+}
+
+void handleReboot() { if (!authed()) return; sendOk(); scheduleReboot(800); }
+
+void handleUpdateDone() {
+  if (!authed()) return;
+  const bool ok = !Update.hasError();
+  web.send(ok ? 200 : 500, "text/plain", ok ? "Update OK — rebooting" : "Update failed");
+  if (ok) scheduleReboot(1000);
+}
+
+void handleUpdateUpload() {
+  if (net.adminPass.length() && !web.authenticate("admin", net.adminPass.c_str())) return;
+  HTTPUpload& up = web.upload();
+  if (up.status == UPLOAD_FILE_START) { rxStop(); Update.begin(UPDATE_SIZE_UNKNOWN); }
+  else if (up.status == UPLOAD_FILE_WRITE) Update.write(up.buf, up.currentSize);
+  else if (up.status == UPLOAD_FILE_END) Update.end(true);
+}
+
+void handleRoot() {
+  web.sendHeader("Cache-Control", "no-cache");
+  web.send_P(200, "text/html", WEB_UI_HTML);
+}
+
+void handleNotFound() {
+  if (apMode) { web.sendHeader("Location", String("http://") + WiFi.softAPIP().toString() + "/", true); web.send(302, "text/plain", ""); return; }
+  web.send(404, "text/plain", "not found");
+}
+
+void setupWeb() {
+  web.on("/", HTTP_GET, handleRoot);
+  web.on("/api/state", HTTP_GET, handleState);
+  web.on("/api/config", HTTP_GET, handleConfigGet);
+  web.on("/api/network", HTTP_POST, handleNetworkPost);
+  web.on("/api/pins", HTTP_POST, handlePinsPost);
+  web.on("/api/remote", HTTP_POST, handleRemotePost);
+  web.on("/api/blinds", HTTP_POST, handleBlindsPost);
+  web.on("/api/command", HTTP_POST, handleCommandPost);
+  web.on("/api/test", HTTP_POST, handleTestPost);
+  web.on("/api/calibrate", HTTP_POST, handleCalibratePost);
+  web.on("/api/reboot", HTTP_POST, handleReboot);
+  web.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
+  web.onNotFound(handleNotFound);
+  web.begin();
+}
+
+// ---------------------------------------------------------------- Wi-Fi
+void startAp() {
+  if (apMode) return;
+  const String name = String("AOK-Blinds-") + String(static_cast<uint32_t>(ESP.getEfuseMac() >> 24) & 0xFFFF, HEX);
+  WiFi.mode(net.ssid.length() ? WIFI_AP_STA : WIFI_AP);
+  WiFi.softAP(name.c_str());
+  dns.start(53, "*", WiFi.softAPIP());
+  apMode = true;
+  Serial.printf("Setup Wi-Fi '%s' at http://%s\n", name.c_str(), WiFi.softAPIP().toString().c_str());
+}
+
+void stopAp() {
+  if (!apMode) return;
+  dns.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  apMode = false;
+}
+
+void setupWifi() {
+  WiFi.persistent(false);
+  WiFi.setHostname(net.hostname.c_str());
+  if (!net.ssid.length()) { startAp(); return; }
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(net.ssid.c_str(), net.pass.c_str());
+  staStartMs = millis();
+}
+
+void maintainWifi() {
+  const bool up = WiFi.status() == WL_CONNECTED;
+  if (up) {
+    if (apMode && millis() - staStartMs > 5000) stopAp();
+    if (!mdnsReady && MDNS.begin(net.hostname.c_str())) { MDNS.addService("http", "tcp", 80); mdnsReady = true; }
+    if (!otaReady) {
+      ArduinoOTA.setHostname(net.hostname.c_str());
+      if (net.adminPass.length()) ArduinoOTA.setPassword(net.adminPass.c_str());
+      ArduinoOTA.onStart([]() { rxStop(); });
+      ArduinoOTA.begin();
+      otaReady = true;
+    }
+  } else if (net.ssid.length() && !apMode && millis() - staStartMs > 45000) {
+    startAp();  // can't join — open the setup portal but keep trying the home network
+  }
+  if (apMode) dns.processNextRequest();
+}
+
+void updateLed() {
+  if (pins.led < 0) return;
+  const uint32_t now = millis();
+  bool on;
+  if (now - lastRxFlashMs < 120) on = true;
+  else if (apMode) on = (now / 150) % 2;                         // fast blink: setup portal
+  else if (WiFi.status() != WL_CONNECTED) on = (now / 600) % 2;   // slow blink: joining Wi-Fi
+  else if (!radioReady) on = (now / 1000) % 4 == 0;               // blip: radio missing
+  else on = net.mqttHost.length() && !mqtt.connected() ? (now / 1000) % 2 : true;
+  ledSet(on);
+}
+
+}  // namespace
+
+void setup() {
+  Serial.begin(115200);
+  delay(150);
+  Serial.printf("\nA-OK Blind Bridge %s\n", FW_VERSION);
+  prefs.begin("aok", false);
+  loadNet();
+  loadPins();
+  loadRemote();
+  loadBlinds();
+  loadPositions();
+  if (pins.led >= 0) { pinMode(pins.led, OUTPUT); ledSet(true); }
+  setupRadio();
+  setupWifi();
+  setupWeb();
+  mqtt.setBufferSize(2048);
+  mqtt.setCallback(onMqtt);
+}
+
+void loop() {
+  pollRadio();
+  maintainWifi();
+  web.handleClient();
+  if (otaReady) ArduinoOTA.handle();
+  ensureMqtt();
+  if (mqtt.connected()) mqtt.loop();
+  pollRadio();
+  updateMotion();
+  if (mqtt.connected() && millis() - lastDiagMs > 30000) publishDiagnostics();
+  if (calIndex >= 0 && millis() - calStartMs > 300000) calIndex = -1;
+  updateLed();
+  if (rebootPending && static_cast<int32_t>(millis() - rebootAtMs) >= 0) { savePositions(); ESP.restart(); }
+}
