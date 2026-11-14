@@ -1,4 +1,5 @@
-// Motolux Blind Bridge — ESP32 + CC1101 firmware for Motolux (A-OK protocol) 433.92 MHz blind motors.
+// A-OK Blind Bridge: ESP32 + CC1101 firmware for 433.92 MHz A-OK blind motors (sold under several
+// brands, including Motolux). https://github.com/olliemaller/aok-blind-bridge
 //
 // Based on pgnehm/ESP32-Orvibo-A-OK-HomeAssistant-Blind-Bridge (protocol research, encoder rules,
 // CC1101 async OOK approach). This version adds: on-device learning from the physical remote,
@@ -23,7 +24,8 @@
 #include "aok_protocol.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.2.0"
+#define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
 #ifndef DEFAULT_PIN_SCK
@@ -65,10 +67,12 @@ struct Pins {
 };
 
 struct NetCfg {
-  String ssid, pass, hostname = "motolux-blinds", adminPass;
+  String ssid, pass, hostname = "aok-blinds", adminPass;
+  String brand = "A-OK";            // shown in the page title, setup Wi-Fi name and Home Assistant
+  String tz, tzName;                // POSIX time zone string and the IANA name it came from
   String mqttHost;
   uint16_t mqttPort = 1883;
-  String mqttUser, mqttPass, base = "motolux_blinds", discovery = "homeassistant";
+  String mqttUser, mqttPass, base = "aok_blinds", discovery = "homeassistant";
 };
 
 struct RemoteCfg {
@@ -82,7 +86,7 @@ struct RemoteCfg {
 };
 
 struct BlindCfg {
-  String id, name, deviceClass = "shade";
+  String id, name, room, deviceClass = "shade";
   uint16_t mask = 1;
   uint32_t openMs = 30000, closeMs = 30000;
   bool invert = false;
@@ -123,6 +127,9 @@ PubSubClient mqtt(wifiClient);
 
 bool radioReady = false, apMode = false, otaReady = false, mdnsReady = false;
 bool learnMode = false, rebootPending = false, discoveryPending = true;
+uint32_t stateRev = 1;               // bumps when frames, calibration history or config change (page refetches)
+bool positionsDirty = false;         // positions are written to flash a few seconds after things settle
+uint32_t positionsDirtyMs = 0;
 uint32_t learnStartedMs = 0, rebootAtMs = 0, lastMqttTryMs = 0, lastDiagMs = 0, staStartMs = 0;
 uint32_t lastTxMs = 0, lastRxFlashMs = 0;
 HeardFrame frames[kMaxFrames];
@@ -230,16 +237,23 @@ void saveNet() {
   d["ssid"] = net.ssid; d["pass"] = net.pass; d["host"] = net.hostname; d["admin"] = net.adminPass;
   d["mh"] = net.mqttHost; d["mp"] = net.mqttPort; d["mu"] = net.mqttUser; d["mw"] = net.mqttPass;
   d["base"] = net.base; d["disc"] = net.discovery;
+  d["brand"] = net.brand; d["tz"] = net.tz; d["tzn"] = net.tzName;
   String s; serializeJson(d, s); prefs.putString("net", s);
 }
 
 void loadNet() {
   JsonDocument d;
+  const bool upgraded = prefs.isKey("net");
   if (deserializeJson(d, prefs.getString("net", "{}"))) return;
-  net.ssid = d["ssid"] | ""; net.pass = d["pass"] | ""; net.hostname = d["host"] | "motolux-blinds";
+  net.ssid = d["ssid"] | ""; net.pass = d["pass"] | ""; net.hostname = d["host"] | "aok-blinds";
   net.adminPass = d["admin"] | ""; net.mqttHost = d["mh"] | ""; net.mqttPort = d["mp"] | 1883;
-  net.mqttUser = d["mu"] | ""; net.mqttPass = d["mw"] | ""; net.base = d["base"] | "motolux_blinds";
+  net.mqttUser = d["mu"] | ""; net.mqttPass = d["mw"] | ""; net.base = d["base"] | "aok_blinds";
   net.discovery = d["disc"] | "homeassistant";
+  net.brand = d["brand"] | "";
+  net.tz = d["tz"] | ""; net.tzName = d["tzn"] | "";
+  // settings saved by 1.0.x/1.1.x: keep what those versions did
+  if (!net.brand.length()) net.brand = net.hostname.indexOf("motolux") >= 0 ? "Motolux" : "A-OK";
+  if (upgraded && !d["tz"].is<const char*>()) { net.tz = "AEST-10AEDT,M10.1.0,M4.1.0/3"; net.tzName = "Australia/Melbourne"; }
 }
 
 void savePins() {
@@ -310,7 +324,7 @@ void loadRemote() {
 void blindToJson(size_t i, JsonObject o) {
   o["id"] = cfg[i].id; o["name"] = cfg[i].name; o["channels"] = maskText(cfg[i].mask);
   o["open_ms"] = cfg[i].openMs; o["close_ms"] = cfg[i].closeMs; o["invert"] = cfg[i].invert;
-  o["favourite"] = cfg[i].favourite; o["device_class"] = cfg[i].deviceClass;
+  o["favourite"] = cfg[i].favourite; o["device_class"] = cfg[i].deviceClass; o["room"] = cfg[i].room;
 }
 
 uint16_t parseChannels(const String& text) {
@@ -344,6 +358,8 @@ bool blindsFromJson(JsonArrayConst arr, String& err) {
     b.favourite = o["favourite"] | -1;
     if (b.favourite > 100) b.favourite = 100;
     b.deviceClass = o["device_class"] | "shade";
+    b.room = o["room"] | "";
+    b.room.trim();
     next[n++] = b;
   }
   // keep runtime state for blinds that still exist
@@ -370,7 +386,10 @@ void loadBlinds() {
   blindsFromJson(d.as<JsonArrayConst>(), err);
 }
 
+void requestPositionSave() { positionsDirty = true; positionsDirtyMs = millis(); }
+
 void savePositions() {
+  positionsDirty = false;
   JsonDocument d;
   for (size_t i = 0; i < blindCount; ++i) if (st[i].motion == Motion::Stopped) d[cfg[i].id] = st[i].position;
   String s; serializeJson(d, s);
@@ -414,6 +433,7 @@ void addCalRecord(const String& name, bool opening, uint32_t ms, uint32_t previo
   CalRecord& r = calHistory[calHistoryCount++];
   r.name = name; r.opening = opening; r.ms = ms; r.previousMs = previousMs; r.when = wallClock();
   saveCalHistory();
+  stateRev++;
 }
 
 // ---------------------------------------------------------------- radio
@@ -563,7 +583,7 @@ void applyAction(uint16_t mask, aok::Action action, const String& source, int co
     else
       beginMotion(j, m, m == Motion::Opening ? 100 : 0, false, source);
   }
-  savePositions();
+  requestPositionSave();
 }
 
 bool groupPosition(size_t g, int& pos, Motion& motion);
@@ -627,12 +647,14 @@ String nodeId() { return net.base; }
 void deviceJson(JsonObject o) {
   JsonObject dev = o["device"].to<JsonObject>();
   dev["identifiers"].to<JsonArray>().add(nodeId());
-  dev["name"] = "Motolux Blind Bridge";
-  dev["manufacturer"] = "DIY";
+  dev["name"] = net.brand + " Blind Bridge";
+  dev["manufacturer"] = "aok-blind-bridge";
   dev["model"] = "ESP32 + CC1101";
   dev["sw_version"] = FW_VERSION;
   if (WiFi.status() == WL_CONNECTED) dev["configuration_url"] = String("http://") + WiFi.localIP().toString();
   o["availability_topic"] = topic("status");
+  JsonObject origin = o["origin"].to<JsonObject>();
+  origin["name"] = "aok-blind-bridge"; origin["sw_version"] = FW_VERSION; origin["support_url"] = PROJECT_URL;
 }
 
 void publishJson(const String& t, JsonDocument& d, bool retain = true) {
@@ -665,7 +687,8 @@ void publishDiscovery() {
       dev["identifiers"][0] = uid;
       dev["name"] = cfg[i].name;
       dev["via_device"] = nodeId();
-      dev["model"] = String("Motolux motor · channel ") + maskText(cfg[i].mask);
+      dev["model"] = net.brand + " motor · channel " + maskText(cfg[i].mask);
+      if (cfg[i].room.length()) dev["suggested_area"] = cfg[i].room;
       publishJson(disc + "/cover/" + uid + "/config", d);
     }
     struct Btn { const char* key; const char* name; const char* payload; const char* icon; };
@@ -779,12 +802,30 @@ void publishDiagnostics() {
 
 bool handleBlindCommand(size_t i, String cmd, const String& source, String& err);
 
+// Up, Down or Stop for every blind at once: one radio frame with all their channels.
+bool allBlinds(String cmd, const String& source, String& err) {
+  cmd.trim(); cmd.toUpperCase();
+  const aok::Action a = cmd == "OPEN" ? aok::Action::Open : cmd == "CLOSE" ? aok::Action::Close : cmd == "STOP" ? aok::Action::Stop : aok::Action::Unknown;
+  if (a == aok::Action::Unknown) { err = "all blinds accept OPEN, CLOSE or STOP"; return false; }
+  // reversed blinds need the opposite command, so they go in a second frame
+  uint16_t normal = 0, reversed = 0;
+  for (size_t i = 0; i < blindCount; ++i) (cfg[i].invert ? reversed : normal) |= cfg[i].mask;
+  reversed &= ~normal;
+  if (!normal && !reversed) { err = "no blinds set up"; return false; }
+  const aok::Action flip = a == aok::Action::Open ? aok::Action::Close : a == aok::Action::Close ? aok::Action::Open : a;
+  if (normal) { if (!sendAction(normal, a, err)) return false; applyAction(normal, a, source, -1, -1); }
+  if (reversed) { if (!sendAction(reversed, flip, err)) return false; applyAction(reversed, flip, source, -1, -1); }
+  LOGI("All blinds: %s (%s)", cmd.c_str(), source.c_str());
+  return true;
+}
+
 void onMqtt(char* t, byte* payload, unsigned int len) {
   String tp(t), msg;
   msg.reserve(len);
   for (unsigned int k = 0; k < len; ++k) msg += static_cast<char>(payload[k]);
   if (!msg.length()) return;
   if (tp == topic("learn/set")) { learnMode = true; learnStartedMs = millis(); learnStatus = "waiting"; return; }
+  if (tp == topic("all/set")) { String err; if (!allBlinds(msg, "home_assistant", err)) LOGW("All blinds: %s", err.c_str()); return; }
   for (size_t i = 0; i < blindCount; ++i) {
     if (tp == blindTopic(i, "set") || tp == blindTopic(i, "set_position")) {
       String err;
@@ -815,6 +856,7 @@ void ensureMqtt() {
   LOGI("MQTT connected to %s:%u", net.mqttHost.c_str(), net.mqttPort);
   mqtt.publish(will.c_str(), "online", true);
   mqtt.subscribe(topic("learn/set").c_str());
+  mqtt.subscribe(topic("all/set").c_str());
   for (size_t i = 0; i < blindCount; ++i) {
     mqtt.subscribe(blindTopic(i, "set").c_str());
     mqtt.subscribe(blindTopic(i, "set_position").c_str());
@@ -844,7 +886,7 @@ bool handleBlindCommand(size_t i, String cmd, const String& source, String& err)
       st[j].lastSource = "marked";
       st[j].dirty = true;
     }
-    savePositions();
+    requestPositionSave();
     return true;
   }
   bool numeric = cmd.length() > 0;
@@ -878,7 +920,7 @@ void updateMotion() {
     s.dirty = true;
     anyStopped = true;
   }
-  if (anyStopped) savePositions();
+  if (anyStopped) requestPositionSave();
   // groups follow their members
   for (size_t i = 0; i < blindCount; ++i) {
     if (__builtin_popcount(cfg[i].mask) <= 1) continue;
@@ -897,6 +939,7 @@ void recordFrame(const aok::Frame& f, bool matched) {
     last.ms = millis();
     return;
   }
+  stateRev++;
   frames[frameHead] = HeardFrame{millis(), f, matched, 1};
   frameHead = (frameHead + 1) % kMaxFrames;
   if (frameCount < kMaxFrames) frameCount++;
@@ -959,7 +1002,7 @@ void pollRadio() {
 bool authed() {
   if (!net.adminPass.length()) return true;
   if (web.authenticate("admin", net.adminPass.c_str())) return true;
-  web.requestAuthentication(BASIC_AUTH, "Motolux Blind Bridge");
+  web.requestAuthentication(BASIC_AUTH, "Blind Bridge");
   return false;
 }
 
@@ -980,8 +1023,10 @@ bool bodyJson(JsonDocument& d) {
 }
 
 void handleState() {
+  const bool lite = web.hasArg("lite");  // frequent polls skip frames and calibration history
   JsonDocument d;
   d["fw"] = FW_VERSION; d["uptime"] = millis() / 1000; d["heap"] = ESP.getFreeHeap();
+  d["rev"] = stateRev; d["brand"] = net.brand; d["lite"] = lite;
   d["reset_reason"] = static_cast<int>(esp_reset_reason());
   JsonObject w = d["wifi"].to<JsonObject>();
   w["connected"] = WiFi.status() == WL_CONNECTED; w["ssid"] = net.ssid; w["ip"] = WiFi.localIP().toString();
@@ -1008,6 +1053,7 @@ void handleState() {
       o["goal"] = (st[i].autoStop && st[i].motion == mo) ? st[i].target : (mo == Motion::Opening ? 100 : 0);
     }
   }
+  if (!lite) {
   JsonArray fr = d["frames"].to<JsonArray>();
   for (size_t k = 0; k < frameCount; ++k) {
     const HeardFrame& h = frames[(frameHead + kMaxFrames - 1 - k) % kMaxFrames];
@@ -1025,6 +1071,7 @@ void handleState() {
     o["ms"] = calHistory[k].ms; o["previous_ms"] = calHistory[k].previousMs;
     if (calHistory[k].when) o["when"] = static_cast<uint32_t>(calHistory[k].when);
   }
+  }
   d["time"] = static_cast<uint32_t>(wallClock());
   d["log_seq"] = logSeq;
   JsonObject c = d["calibration"].to<JsonObject>();
@@ -1041,6 +1088,7 @@ void handleConfigGet() {
   n["admin_set"] = net.adminPass.length() > 0;
   n["mqtt_host"] = net.mqttHost; n["mqtt_port"] = net.mqttPort; n["mqtt_user"] = net.mqttUser;
   n["mqtt_pass_set"] = net.mqttPass.length() > 0; n["base_topic"] = net.base; n["discovery_prefix"] = net.discovery;
+  n["brand"] = net.brand; n["tz"] = net.tz; n["tz_name"] = net.tzName;
   JsonObject p = d["pins"].to<JsonObject>();
   p["sck"] = pins.sck; p["miso"] = pins.miso; p["mosi"] = pins.mosi; p["cs"] = pins.cs;
   p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm;
@@ -1066,6 +1114,11 @@ void handleNetworkPost() {
   if (d["mqtt_pass"].is<const char*>() && d["mqtt_pass"].as<String>().length()) net.mqttPass = d["mqtt_pass"].as<String>();
   if (d["base_topic"].is<const char*>() && d["base_topic"].as<String>().length()) net.base = slug(d["base_topic"].as<String>());
   if (d["discovery_prefix"].is<const char*>() && d["discovery_prefix"].as<String>().length()) net.discovery = d["discovery_prefix"].as<String>();
+  if (d["brand"].is<const char*>()) { String v = d["brand"].as<String>(); v.trim(); if (v.length() && v.length() <= 24) net.brand = v; }
+  if (d["tz"].is<const char*>()) {
+    net.tz = d["tz"].as<String>(); net.tzName = d["tz_name"] | "";
+    setenv("TZ", net.tz.length() ? net.tz.c_str() : "UTC0", 1); tzset();
+  }
   saveNet();
   LOGI("Network settings saved%s", reboot ? ", restarting" : "");
   if (mqtt.connected()) mqtt.disconnect();
@@ -1103,7 +1156,8 @@ void handleBlindsPost() {
   String err;
   if (!blindsFromJson(d["blinds"].as<JsonArrayConst>(), err)) { sendError(err); return; }
   saveBlinds();
-  savePositions();
+  requestPositionSave();
+  stateRev++;
   LOGI("Blinds saved (%u)", static_cast<unsigned>(blindCount));
   if (mqtt.connected()) mqtt.disconnect();  // reconnect re-subscribes and republishes discovery
   lastMqttTryMs = 0;
@@ -1113,6 +1167,11 @@ void handleBlindsPost() {
 void handleCommandPost() {
   if (!authed()) return;
   JsonDocument d; if (!bodyJson(d)) return;
+  if (String(d["id"] | "") == "all") {
+    String err;
+    if (!allBlinds(d["cmd"].as<String>(), "web", err)) { sendError(err); return; }
+    sendOk(); return;
+  }
   const int i = findBlind(d["id"] | "");
   if (i < 0) { sendError("unknown blind"); return; }
   String err;
@@ -1162,11 +1221,11 @@ void handleCalibratePost() {
     st[calIndex].position = st[calIndex].startPos = st[calIndex].target = p;
     st[calIndex].dirty = true;
     saveBlinds();
-    savePositions();
+    requestPositionSave();
     JsonDocument r; r["ok"] = true; r["measured_ms"] = ms; sendJson(r);
     calIndex = -1;
   } else if (action == "clear_history") {
-    calHistoryCount = 0; saveCalHistory(); sendOk();
+    calHistoryCount = 0; saveCalHistory(); stateRev++; sendOk();
   } else if (action == "cancel") {
     if (calIndex >= 0) { stopBlind(calIndex, "calibration", err); LOGI("Calibration cancelled"); }
     calIndex = -1;
@@ -1220,7 +1279,7 @@ void handleLog() {
       else snprintf(head, sizeof(head), "+%lu.%03lus", static_cast<unsigned long>(l.ms / 1000), static_cast<unsigned long>(l.ms % 1000));
       out += head; out += ' '; out += l.level; out += ' '; out += l.text; out += '\n';
     }
-    web.sendHeader("Content-Disposition", "attachment; filename=motolux-bridge-log.txt");
+    web.sendHeader("Content-Disposition", "attachment; filename=blind-bridge-log.txt");
     web.send(200, "text/plain", out);
     return;
   }
@@ -1292,7 +1351,10 @@ void setupWeb() {
 // ---------------------------------------------------------------- Wi-Fi
 void startAp() {
   if (apMode) return;
-  const String name = String("Motolux-Blinds-") + String(static_cast<uint32_t>(ESP.getEfuseMac() >> 24) & 0xFFFF, HEX);
+  String brandSlug;
+  for (char c : net.brand) if (isalnum(static_cast<unsigned char>(c))) brandSlug += c;
+  if (!brandSlug.length()) brandSlug = "AOK";
+  const String name = brandSlug + "-Blinds-" + String(static_cast<uint32_t>(ESP.getEfuseMac() >> 24) & 0xFFFF, HEX);
   WiFi.mode(WIFI_AP_STA);  // STA side stays up so the setup page can scan for networks
   WiFi.softAP(name.c_str());
   dns.start(53, "*", WiFi.softAPIP());
@@ -1327,7 +1389,7 @@ void maintainWifi() {
     else if (net.ssid.length()) LOGW("Wi-Fi disconnected from %s", net.ssid.c_str());
   }
   if (up) {
-    if (!ntpStarted) { configTzTime("AEST-10AEDT,M10.1.0,M4.1.0/3", "pool.ntp.org", "time.google.com"); ntpStarted = true; }
+    if (!ntpStarted) { configTzTime(net.tz.length() ? net.tz.c_str() : "UTC0", "pool.ntp.org", "time.google.com"); ntpStarted = true; }
     if (apMode && millis() - staStartMs > 5000) stopAp();
     if (!mdnsReady && MDNS.begin(net.hostname.c_str())) { MDNS.addService("http", "tcp", 80); mdnsReady = true; }
     if (!otaReady) {
@@ -1373,7 +1435,7 @@ void setup() {
     const esp_reset_reason_t rr = esp_reset_reason();
     const char* why = rr == ESP_RST_POWERON ? "power on" : rr == ESP_RST_SW ? "restart" : rr == ESP_RST_BROWNOUT ? "low voltage"
       : (rr == ESP_RST_PANIC ? "crash" : (rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT) ? "watchdog" : "other");
-    LOGI("Motolux Blind Bridge %s started after %s, %u blinds", FW_VERSION, why, static_cast<unsigned>(blindCount));
+    LOGI("%s Blind Bridge %s started after %s, %u blinds", net.brand.c_str(), FW_VERSION, why, static_cast<unsigned>(blindCount));
   }
   if (pins.led >= 0) { pinMode(pins.led, OUTPUT); ledSet(true); }
   setupRadio();
@@ -1395,5 +1457,10 @@ void loop() {
   if (mqtt.connected() && millis() - lastDiagMs > 30000) publishDiagnostics();
   if (calIndex >= 0 && millis() - calStartMs > 300000) calIndex = -1;
   updateLed();
+  if (positionsDirty && millis() - positionsDirtyMs > 3000) {
+    bool still = true;
+    for (size_t i = 0; i < blindCount; ++i) still &= st[i].motion == Motion::Stopped;
+    if (still) savePositions();
+  }
   if (rebootPending && static_cast<int32_t>(millis() - rebootAtMs) >= 0) { savePositions(); ESP.restart(); }
 }
