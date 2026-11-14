@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#101214" media="(prefers-color-scheme: dark)">
+<title>Motolux Blinds</title>
+<style>
+:root{
+  --bg:#f6f7f9;--panel:#fff;--panel2:#f1f3f6;--line:#e3e6eb;--line2:#d3d8df;
+  --text:#14171c;--text2:#59606b;--text3:#8a919c;
+  --acc:#1f6feb;--acc-bg:#e8f0fe;--acc-text:#1553b6;
+  --ok:#1a7f4b;--ok-bg:#e6f4ec;--warn:#9a6100;--warn-bg:#fdf3e1;--bad:#c42b2b;--bad-bg:#fcebeb;
+  --fabric:#c9ced6;--fabric-edge:#9aa2ad;--glass:#e9f2fb;--frame:#7d8590;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.05);
+  --r:12px;--r-sm:8px;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#101214;--panel:#181b1f;--panel2:#1f2328;--line:#2a2f36;--line2:#363c45;
+  --text:#eceef1;--text2:#a4abb5;--text3:#757d88;
+  --acc:#4c8dff;--acc-bg:#16243b;--acc-text:#9cc0ff;
+  --ok:#4ac684;--ok-bg:#12291d;--warn:#e5ad4a;--warn-bg:#2d2312;--bad:#f07070;--bad-bg:#331717;
+  --fabric:#59616c;--fabric-edge:#7a8390;--glass:#1d2a38;--frame:#8b939e;
+  --shadow:none;
+}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--font);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+h2{font-size:15px;font-weight:600;margin:0}
+h3{font-size:13px;font-weight:600;margin:0}
+p{margin:0}
+a{color:var(--acc)}
+a.btn{text-decoration:none;color:inherit}
+.muted{color:var(--text2)}.faint{color:var(--text3)}.small{font-size:12.5px}
+.mono{font-family:var(--mono);font-size:12px}
+
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line)}
+.top{max-width:1040px;margin:0 auto;padding:12px 16px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;margin-right:auto;min-width:0}
+.brand svg{flex:none}
+.brand b{display:block;font-size:15px;font-weight:600;letter-spacing:-.01em}
+.brand span{display:block;font-size:12px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pills{display:flex;gap:6px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:99px;border:1px solid var(--line);background:var(--panel);font-size:12px;color:var(--text2);cursor:pointer;white-space:nowrap}
+.pill:hover{border-color:var(--line2)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--text3);flex:none}
+.pill.ok .dot{background:var(--ok)}.pill.warn .dot{background:var(--warn)}.pill.bad .dot{background:var(--bad)}
+.pill.bad{color:var(--bad)}
+nav{max-width:1040px;margin:0 auto;padding:0 10px;display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+nav button{border:0;background:none;padding:12px 10px 11px;color:var(--text2);cursor:pointer;white-space:nowrap;border-bottom:2px solid transparent;font-weight:500}
+nav button:hover{color:var(--text)}
+nav button.on{color:var(--text);border-bottom-color:var(--acc)}
+nav .badge{display:inline-block;min-width:16px;height:16px;line-height:16px;padding:0 4px;margin-left:5px;border-radius:8px;background:var(--warn-bg);color:var(--warn);font-size:11px;text-align:center}
+
+main{max-width:1040px;margin:0 auto;padding:16px 16px 96px}
+section{display:none}section.on{display:block}
+.stack{display:grid;gap:12px}
+.cols{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));align-items:start}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+.card>.hd{display:flex;align-items:center;gap:10px;padding:14px 16px 0}
+.card>.hd .sp{margin-left:auto}
+.card>.bd{padding:12px 16px 16px}
+.sep{height:1px;background:var(--line);margin:12px 0}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 14px;border-radius:var(--r-sm);border:1px solid var(--line2);background:var(--panel);cursor:pointer;font-weight:500;white-space:nowrap}
+.btn:hover{background:var(--panel2)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn.pri:hover{filter:brightness(1.07)}
+.btn.dng{color:var(--bad)}
+.btn.sm{height:30px;padding:0 10px;font-size:13px}
+.btn.ghost{border-color:transparent;background:none}
+.btn.ghost:hover{background:var(--panel2)}
+.btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.ic{width:18px;height:18px;flex:none}
+
+.field{display:grid;gap:5px;margin-bottom:12px}
+.field>span{font-size:12.5px;color:var(--text2);font-weight:500}
+.field>small{font-size:12px;color:var(--text3)}
+input[type=text],input[type=password],input[type=number],select{width:100%;height:36px;padding:0 10px;border-radius:var(--r-sm);border:1px solid var(--line2);background:var(--panel)}
+input:focus,select:focus{outline:2px solid var(--acc-bg);border-color:var(--acc)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:0 12px}
+.switch{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none}
+.switch input{appearance:none;width:36px;height:20px;border-radius:10px;background:var(--line2);position:relative;cursor:pointer;flex:none;margin:0;transition:background .15s}
+.switch input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.switch input:checked{background:var(--acc)}
+.switch input:checked::after{transform:translateX(16px)}
+
+.banner{display:flex;gap:12px;align-items:center;padding:12px 14px;border-radius:var(--r);border:1px solid;font-size:13.5px}
+.banner .ic{width:20px;height:20px}
+.banner .grow{flex:1}
+.banner.warn{background:var(--warn-bg);border-color:transparent;color:var(--warn)}
+.banner.bad{background:var(--bad-bg);border-color:transparent;color:var(--bad)}
+.banner.info{background:var(--acc-bg);border-color:transparent;color:var(--acc-text)}
+.banner.ok{background:var(--ok-bg);border-color:transparent;color:var(--ok)}
+.banner b{font-weight:600}
+.banner .btn{color:var(--text)}
+
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:5px;background:var(--panel2);color:var(--text2);font-size:11.5px;font-weight:500;white-space:nowrap}
+.tag.ok{background:var(--ok-bg);color:var(--ok)}.tag.warn{background:var(--warn-bg);color:var(--warn)}.tag.acc{background:var(--acc-bg);color:var(--acc-text)}.tag.bad{background:var(--bad-bg);color:var(--bad)}
+
+/* blinds */
+.blinds{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.blind{padding:14px 14px 12px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px}
+.win{width:58px;height:50px;grid-row:span 2;cursor:pointer}
+.win .frame{fill:var(--glass);stroke:var(--frame);stroke-width:1.5}
+.win .fabric{fill:var(--fabric)}
+.win .rail{fill:var(--fabric-edge)}
+.win .head{fill:var(--frame)}
+.win.unknown .fabric{fill:url(#hatch)}
+.bname{display:flex;align-items:center;gap:8px;min-width:0}
+.bname b{font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bstate{font-size:13px;color:var(--text2);display:flex;align-items:center;gap:6px;min-height:20px}
+.bstate .arrow{width:14px;height:14px;color:var(--acc)}
+.bctl{grid-column:1/-1;display:flex;align-items:center;gap:8px;margin-top:10px}
+.bctl .gap{flex:1}
+.round{width:40px;height:40px;border-radius:50%;border:1px solid var(--line2);background:var(--panel);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex:none;color:var(--text)}
+.round:hover{background:var(--panel2)}
+.round:active{transform:scale(.96)}
+.round.fav{color:var(--warn)}
+.slider{grid-column:1/-1;display:flex;align-items:center;gap:10px;min-width:0;margin-top:4px}
+input[type=range]{flex:1;min-width:0;accent-color:var(--acc);height:28px;margin:0}
+.pct{min-width:40px;text-align:right;font-size:13px;color:var(--text2);white-space:nowrap}
+.more{position:relative}
+.menu{position:absolute;right:0;top:44px;z-index:4;background:var(--panel);border:1px solid var(--line2);border-radius:var(--r-sm);box-shadow:0 8px 24px rgba(16,24,40,.14);padding:4px;min-width:170px;display:none}
+.menu.open{display:block}
+.menu button{display:flex;width:100%;border:0;background:none;padding:8px 10px;border-radius:6px;text-align:left;cursor:pointer;gap:8px;align-items:center}
+.menu button:hover{background:var(--panel2)}
+.empty{text-align:center;padding:40px 16px;color:var(--text2)}
+.empty svg{width:48px;height:48px;color:var(--text3);margin-bottom:8px}
+
+/* lists */
+.list{display:grid}
+.li{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
+.li:first-child{border-top:0}
+.li .grow{flex:1;min-width:0}
+.li .when{font-size:12px;color:var(--text3);white-space:nowrap}
+.kind{width:30px;height:30px;border-radius:8px;background:var(--panel2);display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--text2)}
+.kind.mine{background:var(--acc-bg);color:var(--acc-text)}
+.steps{list-style:none;padding:0;margin:0;display:grid;gap:8px}
+.steps li{display:flex;gap:10px;align-items:flex-start}
+.steps .n{width:22px;height:22px;border-radius:50%;border:1.5px solid var(--line2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--text2);flex:none}
+.steps li.done .n{background:var(--ok);border-color:var(--ok);color:#fff}
+.steps li.now .n{border-color:var(--acc);color:var(--acc)}
+.chans{display:grid;grid-template-columns:repeat(8,1fr);gap:6px}
+.chan{height:34px;border-radius:var(--r-sm);border:1px solid var(--line2);background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;position:relative}
+.chan.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.chan.seen:not(.on)::after{content:"";position:absolute;top:4px;right:4px;width:5px;height:5px;border-radius:50%;background:var(--ok)}
+.chan:disabled{cursor:default}
+.chmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.chm{border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 10px;display:flex;gap:8px;align-items:center}
+.chm b{width:24px;height:24px;border-radius:6px;background:var(--panel2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;flex:none}
+.chm.seen b{background:var(--acc-bg);color:var(--acc-text)}
+.chm span{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* editor */
+.ed{padding:0}
+.edh{display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;user-select:none}
+.edh b{font-weight:600}
+.edh .meta{color:var(--text2);font-size:12.5px;margin-left:auto;white-space:nowrap}
+.edh .chev{width:18px;height:18px;color:var(--text3);transition:transform .15s}
+.ed.open .edh .chev{transform:rotate(180deg)}
+.edb{display:none;padding:0 16px 16px;border-top:1px solid var(--line);padding-top:14px}
+.ed.open .edb{display:block}
+.ed .row1{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+.ed .row1 input{font-weight:600}
+.ed .lab{font-size:12.5px;color:var(--text2);font-weight:500;margin-bottom:6px;display:block}
+.savebar{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:6;background:var(--text);color:var(--bg);border-radius:12px;padding:8px 8px 8px 16px;display:none;align-items:center;gap:12px;box-shadow:0 8px 30px rgba(0,0,0,.25);max-width:calc(100vw - 24px)}
+.savebar.show{display:flex}
+.savebar .btn{height:32px}
+.savebar .btn.ghost{color:var(--bg)}
+.savebar .btn.ghost:hover{background:rgba(127,127,127,.2)}
+
+/* calibration */
+.timer{font-size:44px;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:6px 0 2px}
+.timer small{font-size:16px;font-weight:500;color:var(--text2);margin-left:4px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-weight:500;color:var(--text3);font-size:12px;text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:8px;border-bottom:1px solid var(--line);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right}
+.delta.up{color:var(--warn)}.delta.down{color:var(--ok)}
+.tablewrap{overflow-x:auto;margin:0 -8px}
+
+/* logs */
+.log{font-family:var(--mono);font-size:12px;line-height:1.55;background:var(--panel2);border-radius:var(--r-sm);padding:8px 10px;height:min(62vh,640px);overflow:auto;white-space:pre-wrap;word-break:break-word}
+.log .t{color:var(--text3)}
+.log .W{color:var(--warn)}.log .E{color:var(--bad)}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;font-size:13px}
+.kv dt{color:var(--text2)}.kv dd{margin:0}
+.progress{height:6px;border-radius:3px;background:var(--panel2);overflow:hidden;margin-top:10px;display:none}
+.progress i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px;padding:4px 0}
+#toast{position:fixed;left:50%;bottom:80px;transform:translateX(-50%) translateY(12px);opacity:0;pointer-events:none;background:var(--text);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:13.5px;transition:opacity .2s,transform .2s;z-index:9;max-width:calc(100vw - 32px)}
+#toast.show{opacity:1;transform:translateX(-50%)}
+#toast.err{background:var(--bad);color:#fff}
+@media (max-width:560px){
+  .grid2,.grid3{grid-template-columns:1fr}
+  .chans{grid-template-columns:repeat(8,1fr);gap:4px}
+  .chan{height:32px;font-size:12px}
+  .timer{font-size:36px}
+  .pill{height:24px;padding:0 8px;font-size:11.5px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="var(--glass)"/><rect width="2.5" height="6" fill="var(--fabric)"/></pattern>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.8l2.5 5.1 5.6.8-4 3.9.9 5.6-5-2.6-5 2.6.9-5.6-4-3.9 5.6-.8z" fill="currentColor"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="19" cy="12" r="1.7" fill="currentColor"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4.5M12 17.2v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5.5M12 7.8v.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-remote" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 8l2-2 2 2M10 14l2 2 2-2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="11" r="1" fill="currentColor"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5" fill="currentColor"/></symbol>
+    <symbol id="i-release" viewBox="0 0 24 24"><path d="M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-prog" viewBox="0 0 24 24"><text x="12" y="16.5" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor" font-family="Arial">P</text></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-blind" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 7h17M6 10h12M6 13h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  </defs>
+</svg>
+
+<header>
+  <div class="top">
+    <div class="brand">
+      <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><rect width="30" height="30" rx="8" fill="var(--acc)"/><rect x="8" y="7" width="14" height="2.2" rx="1" fill="#fff"/><rect x="9" y="9" width="12" height="9" fill="#fff" opacity=".85"/><rect x="9" y="18" width="12" height="1.6" rx=".8" fill="#fff"/><rect x="8" y="22" width="14" height="1.4" rx=".7" fill="#fff" opacity=".6"/></svg>
+      <div><b>Motolux Blinds</b><span id="devname">Bridge</span></div>
+    </div>
+    <div class="pills">
+      <button class="pill" id="pWifi" onclick="go('settings','set-wifi')"><i class="dot"></i><span class="lbl">Wi-Fi</span></button>
+      <button class="pill" id="pMqtt" onclick="go('settings','set-mqtt')"><i class="dot"></i><span class="lbl">Home Assistant</span></button>
+      <button class="pill" id="pRadio" onclick="go('settings','set-radio')"><i class="dot"></i><span class="lbl">Radio</span></button>
+      <button class="pill" id="pRemote" onclick="go('remote')"><i class="dot"></i><span class="lbl">Remote</span></button>
+    </div>
+  </div>
+  <nav id="nav"></nav>
+</header>
+
+<main>
+<!-- ============ BLINDS ============ -->
+<section id="s-blinds">
+  <div class="stack">
+    <div id="blindAlerts" class="stack"></div>
+    <div id="blindList" class="blinds"></div>
+  </div>
+</section>
+
+<!-- ============ REMOTE ============ -->
+<section id="s-remote">
+  <div class="cols">
+    <div class="stack">
+      <div class="card">
+        <div class="hd"><h2>Your Motolux remote</h2><span class="sp" id="remTag"></span></div>
+        <div class="bd">
+          <p class="muted small" style="margin-bottom:14px">The bridge copies your hand remote, so the blinds accept it like a second remote. Nothing on the motors changes.</p>
+          <ol class="steps" id="learnSteps">
+            <li id="ls1"><span class="n">1</span><div>Press <b>Start learning</b></div></li>
+            <li id="ls2"><span class="n">2</span><div>Hold the remote near the bridge and press <b>Up</b></div></li>
+            <li id="ls3"><span class="n">3</span><div>Press <b>Down</b></div></li>
+            <li id="ls4"><span class="n">4</span><div>Press <b>Stop</b> (the middle button)</div></li>
+          </ol>
+          <p class="small" id="learnMsg" style="margin:14px 0 0;min-height:21px"></p>
+          <div class="sep"></div>
+          <div class="btns">
+            <button class="btn pri" id="btnLearn" onclick="learn()">Start learning</button>
+            <button class="btn" id="btnCancelLearn" onclick="api('/api/remote',{action:'cancel'})">Cancel</button>
+            <button class="btn ghost dng" onclick="forgetRemote()" style="margin-left:auto">Forget remote</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="bd" style="padding-top:14px">
+          <label class="switch"><input type="checkbox" id="listen" onchange="api('/api/remote',{action:'save',remote:{listen:this.checked}})"><span><b style="font-weight:600">Follow the hand remote</b><br><span class="muted small">When someone uses the remote, update the positions here and in Home Assistant.</span></span></label>
+        </div>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <div class="hd"><h2>Channels and blinds</h2><span class="sp"><button class="btn sm" onclick="go('setup')">Set up blinds</button></span></div>
+        <div class="bd">
+          <p class="muted small" style="margin-bottom:12px" id="chIntro"></p>
+          <div class="chmap" id="chMap"></div>
+          <div id="chAdd" style="margin-top:12px"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="hd"><h2>Test a channel</h2></div>
+        <div class="bd">
+          <p class="muted small" style="margin-bottom:10px">Send a command on a channel to see which blind moves.</p>
+          <div class="chans" id="testChans"></div>
+          <div class="btns" style="margin-top:12px">
+            <button class="btn" onclick="testCh('open')"><svg class="ic"><use href="#i-up"/></svg>Up</button>
+            <button class="btn" onclick="testCh('stop')"><svg class="ic"><use href="#i-stop"/></svg>Stop</button>
+            <button class="btn" onclick="testCh('close')"><svg class="ic"><use href="#i-down"/></svg>Down</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SET UP ============ -->
+<section id="s-setup">
+  <div class="stack">
+    <div id="setupAlerts" class="stack"></div>
+    <div id="editors" class="stack"></div>
+    <div class="btns">
+      <button class="btn" onclick="addBlind()"><svg class="ic"><use href="#i-plus"/></svg>Add blind</button>
+      <span class="muted small">A blind on more than one channel is a group: one command moves them all.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CALIBRATE ============ -->
+<section id="s-cal">
+  <div class="cols">
+    <div class="card">
+      <div class="hd"><h2>Measure travel time</h2></div>
+      <div class="bd">
+        <div class="field"><span>Blind</span><select id="calBlind" onchange="drawCal()"></select></div>
+        <div class="grid2 small" id="calNow" style="margin:-4px 0 12px"></div>
+        <ol class="steps" id="calSteps">
+          <li id="cs1"><span class="n">1</span><div>Make sure the blind is fully <b>open</b>.</div></li>
+          <li id="cs2"><span class="n">2</span><div>Press <b>Start closing</b>, then <b>It's stopped</b> the moment it stops at the bottom.</div></li>
+          <li id="cs3"><span class="n">3</span><div>Press <b>Start opening</b>, then <b>It's stopped</b> when it reaches the top.</div></li>
+        </ol>
+        <div id="calLive" style="margin-top:14px">
+          <div class="muted small" id="calLiveLbl">Ready</div>
+          <div class="timer" id="calTimer">0.0<small>s</small></div>
+        </div>
+        <div class="btns" style="margin-top:12px">
+          <button class="btn" id="calClose" onclick="cal('start_close')"><svg class="ic"><use href="#i-down"/></svg>Start closing</button>
+          <button class="btn" id="calOpen" onclick="cal('start_open')"><svg class="ic"><use href="#i-up"/></svg>Start opening</button>
+          <button class="btn pri" id="calDone" onclick="cal('done')">It's stopped</button>
+          <button class="btn ghost" id="calCancel" onclick="cal('cancel')">Cancel</button>
+        </div>
+        <div id="calResult" style="margin-top:12px"></div>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <div class="hd"><h2>Current travel times</h2></div>
+        <div class="bd"><div class="tablewrap"><table id="calTimes"></table></div></div>
+      </div>
+      <div class="card">
+        <div class="hd"><h2>Calibration log</h2><span class="sp"><button class="btn sm ghost" onclick="clearCal()">Clear</button></span></div>
+        <div class="bd"><div class="tablewrap"><table id="calHist"></table></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ACTIVITY ============ -->
+<section id="s-activity">
+  <div class="card">
+    <div class="hd"><h2>Heard on 433.92 MHz</h2>
+      <span class="sp"><label class="switch small"><input type="checkbox" id="onlyMine" onchange="drawActivity()"><span>Only my remote</span></label></span></div>
+    <div class="bd">
+      <p class="muted small" style="margin-bottom:6px">Signals from Motolux remotes nearby, newest first. Neighbours' remotes show as <span class="tag">Other remote</span> and are ignored.</p>
+      <div class="list" id="actList"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LOGS ============ -->
+<section id="s-logs">
+  <div class="card">
+    <div class="hd"><h2>Bridge log</h2>
+      <span class="sp btns">
+        <button class="btn sm" id="logPause" onclick="toggleLogPause()">Pause</button>
+        <button class="btn sm" onclick="logEl.innerHTML='';logLines=0"><svg class="ic"><use href="#i-x"/></svg>Clear view</button>
+        <a class="btn sm" href="/api/log?format=text" download="motolux-bridge-log.txt"><svg class="ic"><use href="#i-download"/></svg>Download</a>
+      </span></div>
+    <div class="bd">
+      <p class="muted small" style="margin-bottom:8px">The last 120 events since the bridge started: commands, remote presses, Wi-Fi and Home Assistant connections, calibrations and errors.</p>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section id="s-settings">
+  <div class="cols">
+    <div class="stack">
+      <div class="card" id="set-wifi">
+        <div class="hd"><h2>Wi-Fi</h2><span class="sp" id="wifiTag"></span></div>
+        <div class="bd">
+          <div class="field"><span>Network</span>
+            <div style="display:flex;gap:8px"><select id="scanSel" onchange="if(this.value)$('n_ssid').value=this.value"><option value="">Press Scan to find networks</option></select><button class="btn" id="scanBtn" onclick="scan()">Scan</button></div>
+          </div>
+          <div class="field"><span>Network name</span><input type="text" id="n_ssid" autocomplete="off" spellcheck="false"></div>
+          <div class="field"><span>Password <span class="faint" id="passSet"></span></span><input type="password" id="n_pass" placeholder="Leave blank to keep the saved password" autocomplete="new-password"></div>
+          <div class="btns"><button class="btn pri" onclick="saveNet('wifi')">Save and connect</button><span class="muted small">The bridge restarts to join the network.</span></div>
+        </div>
+      </div>
+      <div class="card" id="set-mqtt">
+        <div class="hd"><h2>Home Assistant (MQTT)</h2><span class="sp" id="mqttTag"></span></div>
+        <div class="bd">
+          <p class="small" id="mqttMsg" style="margin-bottom:12px"></p>
+          <div class="grid2">
+            <div class="field"><span>Broker address</span><input type="text" id="n_mqtt_host" placeholder="192.168.0.202" spellcheck="false"></div>
+            <div class="field"><span>Port</span><input type="number" id="n_mqtt_port" placeholder="1883"></div>
+            <div class="field"><span>Username</span><input type="text" id="n_mqtt_user" autocomplete="off" spellcheck="false"></div>
+            <div class="field"><span>Password <span class="faint" id="mqttPassSet"></span></span><input type="password" id="n_mqtt_pass" placeholder="Leave blank to keep" autocomplete="new-password"></div>
+          </div>
+          <details><summary>Topics</summary>
+            <div class="grid2" style="margin-top:8px">
+              <div class="field"><span>Base topic</span><input type="text" id="n_base_topic" spellcheck="false"></div>
+              <div class="field"><span>Discovery prefix</span><input type="text" id="n_discovery_prefix" spellcheck="false"></div>
+            </div>
+          </details>
+          <div class="btns" style="margin-top:8px"><button class="btn pri" onclick="saveNet('mqtt')">Save</button></div>
+        </div>
+      </div>
+      <div class="card" id="set-device">
+        <div class="hd"><h2>Device</h2></div>
+        <div class="bd">
+          <div class="grid2">
+            <div class="field"><span>Device name</span><input type="text" id="n_hostname" spellcheck="false"><small id="hostHint"></small></div>
+            <div class="field"><span>Web page password</span><input type="password" id="n_admin" placeholder="None" autocomplete="new-password"><small>User name is <span class="mono">admin</span>. Leave blank for none.</small></div>
+          </div>
+          <div class="btns"><button class="btn pri" onclick="saveNet('device')">Save</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="card" id="set-radio">
+        <div class="hd"><h2>Radio (CC1101)</h2><span class="sp" id="radioTag"></span></div>
+        <div class="bd">
+          <div id="radioMsg" style="margin-bottom:12px"></div>
+          <dl class="kv" id="radioKv"></dl>
+          <div class="sep"></div>
+          <h3 style="margin-bottom:8px">Wiring</h3>
+          <div class="tablewrap"><table id="wiring"></table></div>
+          <details style="margin-top:10px"><summary>Change pins or transmit power</summary>
+            <p class="muted small" style="margin:8px 0 10px">Only needed if the radio is wired differently. Saving restarts the bridge.</p>
+            <div class="grid3" id="pinGrid"></div>
+            <button class="btn" onclick="savePins()">Save and restart</button>
+          </details>
+        </div>
+      </div>
+      <div class="card" id="set-fw">
+        <div class="hd"><h2>Firmware</h2></div>
+        <div class="bd">
+          <dl class="kv" id="fwKv"></dl>
+          <div class="sep"></div>
+          <div class="field"><span>Update</span><input type="file" id="fwFile" accept=".bin" style="font-size:13px"><small>Use the <span class="mono">…-ota.bin</span> file. Blinds, remote and settings are kept.</small></div>
+          <div class="btns"><button class="btn pri" id="fwBtn" onclick="upload()">Upload firmware</button><button class="btn" onclick="restart()">Restart bridge</button></div>
+          <div class="progress" id="fwProg"><i></i></div>
+          <p class="small muted" id="fwMsg" style="margin-top:8px"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<div class="savebar" id="savebar"><span id="saveMsg">Unsaved changes</span><button class="btn ghost" onclick="discardEdits()">Discard</button><button class="btn pri" onclick="saveBlinds()">Save blinds</button></div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const icon=(n,cls='ic')=>`<svg class="${cls}"><use href="#i-${n}"/></svg>`;
+const TABS=[['blinds','Blinds'],['remote','Remote'],['setup','Set up blinds'],['cal','Calibrate'],['activity','Activity'],['logs','Logs'],['settings','Settings']];
+const openEd=new Set();let edKey=0;
+let S=null,C=null,edit=null,dirty=false,tab='blinds',testSel=1,polling=null,busy=false,lastFetch=0;
+const anim={};          // id -> {p,rate,goal,dir,t}
+let dragging=null;      // blind id whose slider is being dragged
+let calAnchor=null;     // {ms,t}
+let calLast=null;       // {id,dir} of the last finished measurement
+
+/* ---------- helpers ---------- */
+function toast(msg,err){const t=$('toast');t.textContent=msg;t.className=err?'show err':'show';clearTimeout(t._h);t._h=setTimeout(()=>t.className=err?'err':'',3200)}
+async function api(url,body){
+  try{
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false){toast(cap(j.error||('Error '+r.status)),true);return null}
+    refresh(true);return j;
+  }catch(e){toast('The bridge is not responding',true);return null}
+}
+const cap=s=>s?s[0].toUpperCase()+s.slice(1):s;
+const cmd=(id,c)=>api('/api/command',{id,cmd:String(c)});
+const secs=ms=>(ms/1000).toFixed(1);
+function clock(t){if(!t)return '';const d=new Date(t*1000),n=new Date();const time=d.toLocaleTimeString('en-AU',{hour:'numeric',minute:'2-digit'});return d.toDateString()==n.toDateString()?time:d.toLocaleDateString('en-AU',{day:'numeric',month:'short'})+', '+time}
+function ago(s){if(s<5)return 'just now';if(s<60)return s+' s ago';if(s<3600)return Math.round(s/60)+' min ago';if(s<86400)return Math.round(s/3600)+' h ago';return Math.round(s/86400)+' d ago'}
+function dur(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d} d ${h} h`:h?`${h} h ${m} min`:`${m} min`}
+const chList=s=>String(s||'').split(',').map(Number).filter(n=>n>=1&&n<=16);
+const remoteOk=()=>S&&S.remote.complete;
+
+/* ---------- navigation ---------- */
+function drawNav(){
+  const warnSetup=S&&!S.blinds.length?1:0;
+  $('nav').innerHTML=TABS.map(([k,l])=>`<button data-t="${k}" class="${k==tab?'on':''}" onclick="go('${k}')">${l}${k=='remote'&&S&&!S.remote.complete?'<span class="badge">!</span>':''}${k=='setup'&&warnSetup?'<span class="badge">!</span>':''}</button>`).join('');
+}
+function go(t,anchor){
+  tab=t;try{localStorage.tab=t}catch(e){}
+  document.querySelectorAll('main section').forEach(s=>s.classList.toggle('on',s.id=='s-'+t));
+  drawNav();
+  if(t=='setup'||t=='settings'||t=='cal')loadConfig();
+  if(t=='logs')pollLog(true);
+  if(t=='settings'&&S&&S.wifi.ap&&!$('scanSel').dataset.done){$('scanSel').dataset.done=1;scan()}
+  if(anchor)setTimeout(()=>$(anchor).scrollIntoView({behavior:'smooth',block:'start'}),60);
+  else window.scrollTo(0,0);
+  if(S)render();
+}
+
+/* ---------- polling ---------- */
+function moving(){return S&&(S.blinds.some(b=>b.motion!='stopped')||S.calibration.active||S.remote.learning)}
+async function refresh(now){
+  if(busy)return;busy=true;
+  try{
+    const r=await fetch('/api/state',{cache:'no-store'});
+    if(r.ok){S=await r.json();lastFetch=performance.now();anchorAll();render()}
+  }catch(e){}
+  busy=false;
+  clearTimeout(polling);
+  polling=setTimeout(refresh,moving()?350:(document.hidden?6000:1800));
+}
+async function loadConfig(){
+  try{const r=await fetch('/api/config',{cache:'no-store'});if(!r.ok)return;C=await r.json();
+    if(!dirty){edit=C.blinds.map(b=>({...b,_k:b.id}));drawEditors()}
+    fillSettings();
+  }catch(e){}
+}
+
+/* ---------- smooth position model ---------- */
+function anchorAll(){
+  const t=performance.now();
+  for(const b of S.blinds){
+    const a=anim[b.id]||(anim[b.id]={});
+    a.known=b.position>=0;
+    a.motion=b.motion;
+    a.rate=b.rate||0;a.goal=b.goal??b.position;
+    // keep the on-screen value continuous: only jump if the server disagrees by more than 2%
+    const shown=a.t?livePos(a,t):b.position;
+    a.p=(a.known&&a.t&&b.motion!='stopped'&&Math.abs(shown-b.position)<2)?shown:b.position;
+    a.t=t;
+  }
+  if(S.calibration.active)calAnchor={ms:S.calibration.elapsed_ms,t};else calAnchor=null;
+}
+function livePos(a,t){
+  if(!a.known)return -1;
+  if(a.motion=='stopped'||!a.rate)return a.p;
+  const d=a.rate*(t-a.t)/1000;
+  return a.motion=='opening'?Math.min(a.p+d,Math.max(a.goal,a.p)):Math.max(a.p-d,Math.min(a.goal,a.p));
+}
+function frame(){
+  const t=performance.now();
+  if(tab=='blinds'&&S)for(const b of S.blinds){
+    const el=document.querySelector(`.blind[data-id="${b.id}"]`);if(!el)continue;
+    const p=livePos(anim[b.id]||{},t);
+    paintBlind(el,b,p);
+  }
+  if(calAnchor&&tab=='cal'){$('calTimer').innerHTML=secs(calAnchor.ms+(t-calAnchor.t))+'<small>s</small>'}
+  requestAnimationFrame(frame);
+}
+
+/* ---------- render ---------- */
+function render(){
+  if(!S)return;
+  $('devname').textContent=S.wifi.ap?'Setup mode':(S.wifi.hostname||'')+(S.wifi.connected?' · '+S.wifi.ip:'');
+  pill('pWifi',S.wifi.ap?'warn':S.wifi.connected?'ok':'bad',S.wifi.ap?'Setup Wi-Fi':S.wifi.connected?'Wi-Fi':'Wi-Fi offline');
+  pill('pMqtt',!S.mqtt.configured?'warn':S.mqtt.connected?'ok':'bad',!S.mqtt.configured?'Home Assistant not set':S.mqtt.connected?'Home Assistant':'Home Assistant offline');
+  pill('pRadio',S.radio.ready?'ok':'bad',S.radio.ready?'Radio':'Radio missing');
+  pill('pRemote',S.remote.complete?'ok':S.remote.learning?'warn':'warn',S.remote.complete?'Remote':S.remote.learning?'Learning…':'Remote not learned');
+  drawNav();
+  if(tab=='blinds')drawBlinds();
+  if(tab=='remote')drawRemote();
+  if(tab=='setup')drawSetupAlerts();
+  if(tab=='cal')drawCal();
+  if(tab=='activity')drawActivity();
+  if(tab=='settings')drawStatus();
+}
+function pill(id,cls,label){const e=$(id);e.className='pill '+cls;e.querySelector('.lbl').textContent=label;e.title=label}
+
+/* blinds */
+let blindSig='';
+function drawBlinds(){
+  const al=[];
+  if(!S.radio.ready)al.push(banner('bad','alert','<b>The radio isn\'t responding.</b> Check the CC1101 wiring.','Wiring',"go('settings','set-radio')"));
+  if(!S.remote.complete)al.push(banner('warn','remote','<b>Learn your remote first.</b> The bridge copies it to control the blinds.','Learn remote',"go('remote')"));
+  $('blindAlerts').innerHTML=al.join('');
+  const list=$('blindList');
+  if(!S.blinds.length){blindSig='';list.innerHTML=`<div class="card empty" style="grid-column:1/-1">${icon('blind','')}<p><b>No blinds yet</b></p><p class="small" style="margin:4px 0 14px">Add a blind for each channel on your remote.</p><button class="btn pri" onclick="go('setup')">Set up blinds</button></div>`;return}
+  const sig=S.blinds.map(b=>[b.id,b.name,b.channels,b.favourite,b.group].join('|')).join(';');
+  if(sig!==blindSig){blindSig=sig;list.innerHTML=S.blinds.map(blindCard).join('')}
+}
+function blindCard(b){
+  return `<div class="card blind" data-id="${b.id}">
+    <svg class="win" viewBox="0 0 58 50" onclick="toggleMenu('${b.id}',event)" aria-hidden="true">
+      <rect class="frame" x="3" y="4" width="52" height="43" rx="2.5"/>
+      <rect class="fabric" x="5.5" y="7" width="47" height="0"/>
+      <rect class="rail" x="5" y="7" width="48" height="2.4" rx="1"/>
+      <rect class="head" x="1.5" y="2" width="55" height="5" rx="1.5"/>
+    </svg>
+    <div class="bname"><b title="${esc(b.name)}">${esc(b.name)}</b>${b.group?'<span class="tag">Group</span>':''}<span class="tag" title="Remote channel">Ch ${esc(b.channels)}</span></div>
+    <div class="bstate"><span class="st"></span></div>
+    <div class="bctl">
+      <button class="round" title="Up" aria-label="Open ${esc(b.name)}" onclick="cmd('${b.id}','OPEN')">${icon('up')}</button>
+      <button class="round" title="Stop" aria-label="Stop ${esc(b.name)}" onclick="cmd('${b.id}','STOP')">${icon('stop')}</button>
+      <button class="round" title="Down" aria-label="Close ${esc(b.name)}" onclick="cmd('${b.id}','CLOSE')">${icon('down')}</button>
+      <span class="gap"></span>
+      ${b.favourite>=0?`<button class="round fav" title="Favourite (${b.favourite}%)" aria-label="Favourite position" onclick="cmd('${b.id}','FAVOURITE')">${icon('star')}</button>`:''}
+      <div class="more"><button class="round" title="More" aria-label="More options" onclick="toggleMenu('${b.id}',event)">${icon('more')}</button>
+        <div class="menu" id="m-${b.id}">
+          <button onclick="cmd('${b.id}','SYNC_OPEN')">${icon('up')}Mark as fully open</button>
+          <button onclick="cmd('${b.id}','SYNC_CLOSE')">${icon('down')}Mark as fully closed</button>
+          <button onclick="go('cal');setTimeout(()=>{$('calBlind').value='${b.id}';drawCal()},50)">${icon('dot')}Calibrate</button>
+          <button onclick="openEd.add('${b.id}');go('setup')">${icon('blind')}Edit</button>
+        </div></div>
+    </div>
+    <div class="slider"><input type="range" min="0" max="100" step="1" aria-label="Position of ${esc(b.name)}"
+        onpointerdown="dragging='${b.id}'" oninput="dragging='${b.id}';this.parentNode.querySelector('.pct').textContent='Move to '+this.value+'%'"
+        onchange="dragging=null;cmd('${b.id}',this.value)" onblur="dragging=null"><span class="pct"></span></div>
+    </div>`;
+}
+function paintBlind(el,b,p){
+  const known=p>=0,pos=known?Math.round(p):null;
+  const h=known?36*(100-p)/100:36;
+  const win=el.querySelector('.win');
+  win.classList.toggle('unknown',!known);
+  win.querySelector('.fabric').setAttribute('height',h.toFixed(2));
+  win.querySelector('.rail').setAttribute('y',(7+Math.max(h-2.4,0)).toFixed(2));
+  const a=anim[b.id]||{},mv=a.motion&&a.motion!='stopped';
+  let txt;
+  if(!known)txt='Unknown · press Up or Down';
+  else if(mv)txt=`${a.motion=='opening'?'Opening':'Closing'} · ${pos}%`;
+  else txt=pos>=100?'Open':pos<=0?'Closed':`${pos}% open`;
+  const st=el.querySelector('.st');
+  const html=(mv?`<svg class="arrow"><use href="#i-${a.motion=='opening'?'up':'down'}"/></svg>`:'')+esc(txt);
+  if(st._h!==html){st.innerHTML=html;st._h=html}
+  const r=el.querySelector('input[type=range]');
+  if(dragging!==b.id){if(known&&document.activeElement!==r)r.value=pos;el.querySelector('.pct').textContent=known?pos+'%':'–'}
+}
+function toggleMenu(id,e){e.stopPropagation();const m=$('m-'+id),open=!m.classList.contains('open');document.querySelectorAll('.menu.open').forEach(x=>x.classList.remove('open'));if(open)m.classList.add('open')}
+document.addEventListener('click',()=>document.querySelectorAll('.menu.open').forEach(x=>x.classList.remove('open')));
+function banner(cls,ic,html,btn,action){return `<div class="banner ${cls}">${icon(ic)}<div class="grow">${html}</div>${btn?`<button class="btn sm" onclick="${action}">${btn}</button>`:''}</div>`}
+
+/* remote */
+function drawRemote(){
+  const r=S.remote,learned=r.prefix&&r.prefix!='000000';
+  $('remTag').innerHTML=r.complete?`<span class="tag ok">${icon('check')} Learned · ID ${esc(r.remote_id)}</span>`:r.learning?'<span class="tag acc">Listening…</span>':learned?'<span class="tag warn">Partly learned</span>':'<span class="tag warn">Not learned</span>';
+  const done=[r.learning||r.complete,!!r.open,!!r.close,!!r.stop];
+  let nowSet=false;
+  done.forEach((d,i)=>{const li=$('ls'+(i+1));const now=!d&&!nowSet&&(i==0||r.learning);if(now)nowSet=true;li.className=d?'done':now?'now':'';li.querySelector('.n').innerHTML=d?icon('check'):(i+1)});
+  const st=r.learn_status||'';
+  $('learnMsg').innerHTML=r.learning?`<span style="color:var(--acc)">Listening for your remote${st&&st!='waiting'?' · '+esc(st):''}…</span>`
+    :r.complete?(st=='complete'?'<span style="color:var(--ok)">Remote learned. You can now control the blinds.</span>':'<span class="muted">Learned and ready.</span>')
+    :st=='timed out'?'<span style="color:var(--warn)">Timed out after 2 minutes. Press Start learning to try again.</span>':'';
+  $('btnLearn').textContent=r.complete?'Learn again':'Start learning';
+  $('btnLearn').disabled=r.learning;$('btnCancelLearn').style.display=r.learning?'':'none';
+  if(document.activeElement!==$('listen'))$('listen').checked=r.listen;
+  // channel map
+  const seen=chList(r.seen),used={};
+  S.blinds.forEach(b=>chList(b.channels).forEach(c=>(used[c]=used[c]||[]).push(b.name)));
+  const chans=[...new Set([...seen,...Object.keys(used).map(Number)])].sort((a,b)=>a-b);
+  $('chIntro').textContent=!learned?'Learn the remote to see its channels here.':chans.length?'Each channel on your remote and the blind it controls. Channels with a blue number have been used on the remote.':'Use each channel on the remote once and it shows up here.';
+  $('chMap').innerHTML=chans.map(c=>`<div class="chm ${seen.includes(c)?'seen':''}"><b>${c}</b><span class="${used[c]?'':'faint'}" title="${esc((used[c]||[]).join(', '))}">${used[c]?esc(used[c].join(', ')):'No blind yet'}</span></div>`).join('');
+  const missing=seen.filter(c=>!used[c]);
+  $('chAdd').innerHTML=missing.length?banner('info','info',`Channel${missing.length>1?'s':''} <b>${missing.join(', ')}</b> ${missing.length>1?'have':'has'} no blind yet.`,'Add blind'+(missing.length>1?'s':''),'addMissing()'):'';
+  $('testChans').innerHTML=Array.from({length:16},(_,i)=>`<button class="chan ${testSel==i+1?'on':''} ${seen.includes(i+1)?'seen':''}" onclick="testSel=${i+1};drawRemote()">${i+1}</button>`).join('');
+}
+function learn(){api('/api/remote',{action:'learn'})}
+function forgetRemote(){if(confirm('Forget the learned remote? The blinds stay set up, but they can\'t be controlled until you learn the remote again.'))api('/api/remote',{action:'forget'})}
+function testCh(a){api('/api/test',{channels:String(testSel),action:a})}
+
+/* set up */
+function drawSetupAlerts(){
+  const al=[];
+  if(!S.remote.complete)al.push(banner('warn','remote','<b>Your remote isn\'t learned yet.</b> You can add blinds now, but they won\'t move until it is.','Learn remote',"go('remote')"));
+  const seen=chList(S.remote.seen),used=new Set();(edit||S.blinds).forEach(b=>chList(b.channels).forEach(c=>used.add(c)));
+  const missing=seen.filter(c=>!used.has(c));
+  if(missing.length)al.push(banner('info','info',`Your remote has used channel${missing.length>1?'s':''} <b>${missing.join(', ')}</b>, which ${missing.length>1?'have':'has'} no blind.`,'Add '+(missing.length>1?'them':'it'),'addMissing()'));
+  $('setupAlerts').innerHTML=al.join('');
+}
+function drawEditors(){
+  if(!edit)return;
+  const seen=chList(S?S.remote.seen:'');
+  $('editors').innerHTML=edit.length?edit.map((b,i)=>`<div class="card ed ${openEd.has(b._k)?'open':''}">
+    <div class="edh" onclick="toggleEd('${b._k}')">${icon('blind')}<b>${esc(b.name||'Unnamed blind')}</b>${chList(b.channels).length>1?'<span class="tag">Group</span>':''}<span class="tag">Ch ${esc(b.channels||'–')}</span>
+      <span class="meta">${secs(b.open_ms)} s up · ${secs(b.close_ms)} s down${b.favourite>=0?' · ★ '+b.favourite+'%':''}${b.invert?' · reversed':''}</span><svg class="chev"><use href="#i-down"/></svg></div>
+    <div class="edb"><div class="row1"><input type="text" value="${esc(b.name)}" placeholder="Name, e.g. Lounge left" oninput="edit[${i}].name=this.value;markDirty();this.closest('.ed').querySelector('.edh b').textContent=this.value||'Unnamed blind'">
+      <button class="btn ghost dng sm" title="Remove" onclick="edit.splice(${i},1);markDirty();drawEditors()">${icon('x')}Remove</button></div>
+    <span class="lab">Remote channel${chList(b.channels).length>1?'s (group)':''}</span>
+    <div class="chans">${Array.from({length:16},(_,c)=>`<button class="chan ${chList(b.channels).includes(c+1)?'on':''} ${seen.includes(c+1)?'seen':''}" onclick="toggleCh(${i},${c+1})">${c+1}</button>`).join('')}</div>
+    <div class="grid3" style="margin-top:14px">
+      <label class="field"><span>Opening time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.open_ms)}" oninput="edit[${i}].open_ms=Math.round(this.value*1000);markDirty()"></label>
+      <label class="field"><span>Closing time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.close_ms)}" oninput="edit[${i}].close_ms=Math.round(this.value*1000);markDirty()"></label>
+      <label class="field"><span>Favourite position (%)</span><input type="number" min="0" max="100" placeholder="None" value="${b.favourite>=0?b.favourite:''}" oninput="edit[${i}].favourite=this.value===''?-1:Math.max(0,Math.min(100,parseInt(this.value)||0));markDirty()"></label>
+    </div>
+    <div class="btns">
+      <label class="field" style="margin:0;min-width:150px"><span>Type in Home Assistant</span><select onchange="edit[${i}].device_class=this.value;markDirty()">${['shade','blind','curtain','awning','shutter'].map(t=>`<option value="${t}" ${t==b.device_class?'selected':''}>${cap(t)}</option>`).join('')}</select></label>
+      <label class="switch" style="margin-top:18px"><input type="checkbox" ${b.invert?'checked':''} onchange="edit[${i}].invert=this.checked;markDirty()"><span class="small">Reversed <span class="faint">(Up closes it)</span></span></label>
+      <span style="margin-left:auto;margin-top:18px" class="btns">
+        <span class="faint small">Test</span>
+        <button class="round" title="Up" onclick="testRow(${i},'open')">${icon('up')}</button>
+        <button class="round" title="Stop" onclick="testRow(${i},'stop')">${icon('stop')}</button>
+        <button class="round" title="Down" onclick="testRow(${i},'close')">${icon('down')}</button>
+      </span>
+    </div></div></div>`).join(''):`<div class="card empty">${icon('blind','')}<p><b>No blinds yet</b></p><p class="small" style="margin-top:4px">Add one for each channel on your remote.</p></div>`;
+  if(S)drawSetupAlerts();
+}
+function toggleCh(i,c){const l=chList(edit[i].channels).filter(x=>x!=c);if(!chList(edit[i].channels).includes(c))l.push(c);edit[i].channels=l.sort((a,b)=>a-b).join(',');markDirty();drawEditors()}
+function testRow(i,a){const ch=edit[i].channels;if(!ch)return toast('Choose a channel first',true);api('/api/test',{channels:ch,action:a})}
+function markDirty(){dirty=true;$('savebar').classList.add('show')}
+function discardEdits(){dirty=false;$('savebar').classList.remove('show');edit=C?C.blinds.map(b=>({...b,_k:b.id})):[];drawEditors()}
+function toggleEd(k){openEd.has(k)?openEd.delete(k):openEd.add(k);drawEditors()}
+function nextChannel(){const used=new Set();edit.forEach(b=>chList(b.channels).forEach(c=>used.add(c)));for(let c=1;c<=16;c++)if(!used.has(c))return c;return 1}
+function addBlind(ch){
+  if(!edit)edit=[];
+  if(edit.length>=16)return toast('The bridge supports up to 16 blinds',true);
+  const c=ch||nextChannel();
+  const k='new'+(++edKey);openEd.add(k);
+  edit.push({_k:k,name:'Blind '+c,channels:String(c),open_ms:30000,close_ms:30000,favourite:-1,device_class:'shade',invert:false});
+  markDirty();drawEditors();
+}
+function addMissing(){
+  if(tab!=='setup')go('setup');
+  const run=()=>{if(!edit)return setTimeout(run,100);const used=new Set();edit.forEach(b=>chList(b.channels).forEach(c=>used.add(c)));chList(S.remote.seen).filter(c=>!used.has(c)).forEach(c=>addBlind(c));toast('Added. Name them, then save.')};
+  run();
+}
+async function saveBlinds(){
+  for(const b of edit){if(!b.name.trim())return toast('Every blind needs a name',true);if(!chList(b.channels).length)return toast(`${b.name}: choose a channel`,true)}
+  const j=await api('/api/blinds',{blinds:edit.map(({_k,...b})=>b)});
+  if(j){dirty=false;$('savebar').classList.remove('show');toast('Blinds saved');blindSig='';loadConfig()}
+}
+window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});
+
+/* calibrate */
+function drawCal(){
+  const sel=$('calBlind'),cur=sel.value||(S.calibration.active?S.calibration.id:'');
+  const opts=S.blinds.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join('');
+  if(sel._o!==opts){sel.innerHTML=opts;sel._o=opts;if(cur)sel.value=cur}
+  const c=S.calibration,b=S.blinds.find(x=>x.id==sel.value);
+  if(c.active&&sel.value!==c.id)sel.value=c.id;
+  sel.disabled=c.active;
+  $('calNow').innerHTML=b?`<span class="muted">Opening: <b style="color:var(--text)">${secs(b.open_ms)} s</b></span><span class="muted">Closing: <b style="color:var(--text)">${secs(b.close_ms)} s</b></span>`:'';
+  const dirC=c.active&&c.direction=='closing',dirO=c.active&&c.direction=='opening';
+  const closedDone=!c.active&&calLast&&calLast.id==sel.value&&calLast.dir=='closing';
+  $('cs1').className=c.active||closedDone?'done':'now';
+  $('cs2').className=dirC?'now':(dirO||closedDone)?'done':'';
+  $('cs3').className=dirO||closedDone?'now':'';
+  ['cs1','cs2','cs3'].forEach((id,i)=>{const li=$(id);li.querySelector('.n').innerHTML=li.className=='done'?icon('check'):i+1});
+  $('calLiveLbl').innerHTML=c.active?`<span style="color:var(--acc)">${esc(c.name||'')} is ${c.direction}. Press <b>It's stopped</b> when it stops.</span>`:(b?'Ready':'Add a blind first');
+  if(!c.active)$('calTimer').innerHTML='0.0<small>s</small>';
+  $('calClose').disabled=$('calOpen').disabled=c.active||!b||!remoteOk();
+  $('calDone').disabled=$('calCancel').disabled=!c.active;
+  $('calTimes').innerHTML=S.blinds.length?'<tr><th>Blind</th><th class="num">Opening</th><th class="num">Closing</th><th>Last calibrated</th></tr>'+S.blinds.map(x=>{const h=[...S.cal_history].reverse().find(r=>r.name==x.name);return `<tr><td>${esc(x.name)}</td><td class="num">${secs(x.open_ms)} s</td><td class="num">${secs(x.close_ms)} s</td><td class="faint small">${h?(h.when?clock(h.when):'Earlier'):'Never'}</td></tr>`}).join(''):'<tr><td class="faint">No blinds yet</td></tr>';
+  const hist=[...S.cal_history].reverse();
+  $('calHist').innerHTML=hist.length?'<tr><th>When</th><th>Blind</th><th>Direction</th><th class="num">Time</th><th class="num">Change</th></tr>'+hist.map(r=>{const d=r.previous_ms?(r.ms-r.previous_ms)/1000:0;return `<tr><td class="faint small">${r.when?clock(r.when):'–'}</td><td>${esc(r.name)}</td><td>${r.direction=='open'?'Opening':'Closing'}</td><td class="num"><b>${secs(r.ms)} s</b></td><td class="num small delta ${d>0?'up':d<0?'down':''}">${!r.previous_ms?'–':Math.abs(d)<0.05?'no change':(d>0?'+':'')+d.toFixed(1)+' s'}</td></tr>`}).join(''):'<tr><td class="faint">Calibrations you do appear here.</td></tr>';
+}
+async function cal(a){
+  const id=$('calBlind').value;
+  if((a=='start_close'||a=='start_open')&&!id)return toast('Choose a blind',true);
+  $('calResult').innerHTML='';
+  const j=await api('/api/calibrate',{action:a,id});
+  if(a=='start_close'||a=='start_open')calLast=null;
+  if(j&&j.measured_ms){calLast={id,dir:S.calibration.direction};const b=S.blinds.find(x=>x.id==id);$('calResult').innerHTML=banner('ok','check',`<b>Saved.</b> ${esc(b?b.name:'')} takes ${secs(j.measured_ms)} s to ${calLast.dir=='closing'?'close. Now measure opening.':'open.'}`)
+    if(!dirty)loadConfig()}
+}
+function clearCal(){if(confirm('Clear the calibration log? Travel times are kept.'))api('/api/calibrate',{action:'clear_history'})}
+
+/* activity */
+const KIND={up:['up','Up'],down:['down','Down'],stop:['stop','Stop'],program:['prog','Programming (P) button'],release:['release','Button released'],other:['dot','Other button']};
+function drawActivity(){
+  const only=$('onlyMine').checked,list=S.frames.filter(f=>!only||f.matched);
+  $('actList').innerHTML=list.length?list.map(f=>{const k=KIND[f.kind]||KIND.other;const lbl=f.kind=='other'?`${k[1]} <span class="mono faint">${esc(f.code)}</span>`:k[1];
+    const names=S.blinds.filter(b=>f.matched&&chList(b.channels).every(c=>chList(f.channels).includes(c))).map(b=>b.name);
+    return `<div class="li"><span class="kind ${f.matched?'mine':''}">${icon(k[0])}</span>
+      <div class="grow"><div>${lbl} · channel ${esc(f.channels)}${f.repeats>1?` <span class="faint small">×${f.repeats}</span>`:''}</div>
+      <div class="small faint">${f.matched?(names.length?esc(names.join(', ')):'Your remote'):'Other remote '+esc(f.remote_id)}</div></div>
+      ${f.matched?'<span class="tag acc">Your remote</span>':'<span class="tag">Other remote</span>'}
+      <span class="when">${f.when?clock(f.when):ago(f.ago_s)}</span></div>`}).join('')
+    :`<div class="empty small">${only?'Nothing from your remote yet.':'Nothing heard yet. Press a button on the remote.'}</div>`;
+}
+
+/* logs */
+const logEl=$('log');let logSeq=0,logLines=0,logPaused=false,logTimer=null;
+async function pollLog(first){
+  clearTimeout(logTimer);
+  if(tab!=='logs')return;
+  if(!logPaused){try{
+    const r=await fetch('/api/log?after='+(first&&!logLines?0:logSeq),{cache:'no-store'});
+    if(r.ok){const j=await r.json();
+      if(j.seq<logSeq){logEl.innerHTML='';logLines=0}
+      const atBottom=logEl.scrollHeight-logEl.scrollTop-logEl.clientHeight<30;
+      const now=Date.now()/1000;
+      logEl.insertAdjacentHTML('beforeend',j.lines.map(l=>{const when=l.when?new Date(l.when*1000).toLocaleTimeString('en-AU',{hour12:false}):'+'+(l.ms/1000).toFixed(1)+'s';return `<div class="${l.level}"><span class="t">${when}</span> ${esc(l.text)}</div>`}).join(''));
+      logSeq=j.seq;logLines+=j.lines.length;
+      if(!logLines)logEl.innerHTML='<div class="t">No events yet.</div>';
+      if(atBottom||first)logEl.scrollTop=logEl.scrollHeight;
+    }}catch(e){}}
+  logTimer=setTimeout(pollLog,2000);
+}
+function toggleLogPause(){logPaused=!logPaused;$('logPause').textContent=logPaused?'Resume':'Pause';if(!logPaused)pollLog()}
+
+/* settings */
+function fillSettings(){
+  if(!C)return;const n=C.network;
+  ['ssid','hostname','mqtt_host','mqtt_port','mqtt_user','base_topic','discovery_prefix'].forEach(k=>{const e=$('n_'+k);if(document.activeElement!==e&&!e.dataset.touched)e.value=n[k]??''});
+  $('passSet').textContent=n.pass_set?'(saved)':'';$('mqttPassSet').textContent=n.mqtt_pass_set?'(saved)':'';
+  $('n_admin').placeholder=n.admin_set?'Password set: type a new one to change':'None';
+  $('hostHint').innerHTML=`Open the page at <span class="mono">http://${esc(n.hostname)}.local</span>`;
+  const P=[['sck','SCK',5],['miso','MISO',7],['mosi','MOSI',6],['cs','CSN',4],['gdo0','GDO0 (send)',3],['gdo2','GDO2 (receive)',8]];
+  $('wiring').innerHTML='<tr><th>CC1101 pin</th><th>ESP32 GPIO</th></tr><tr><td>VCC (pin 2)</td><td>3V3 <span class="faint small">not 5V</span></td></tr><tr><td>GND (pin 1)</td><td>GND</td></tr>'+P.map(([k,l,n])=>`<tr><td>${l} (pin ${n})</td><td>${C.pins[k]}</td></tr>`).join('');
+  const PG=[['sck','SCK'],['miso','MISO'],['mosi','MOSI'],['cs','CSN'],['gdo0','GDO0'],['gdo2','GDO2'],['led','Status LED (-1 none)'],['mhz','Frequency (MHz)'],['pa_dbm','Power (dBm)']];
+  if(!$('pinGrid').dataset.filled){$('pinGrid').innerHTML=PG.map(([k,l])=>`<label class="field"><span>${l}</span><input type="number" step="any" id="p_${k}" value="${C.pins[k]}"></label>`).join('');$('pinGrid').dataset.filled=1}
+  document.querySelectorAll('#s-settings input[id^=n_]').forEach(e=>e.oninput=()=>e.dataset.touched=1);
+}
+function drawStatus(){
+  const w=S.wifi,m=S.mqtt,r=S.radio;
+  $('wifiTag').innerHTML=w.ap?'<span class="tag warn">Setup mode</span>':w.connected?`<span class="tag ok">${esc(w.ssid)} · ${w.rssi} dBm</span>`:'<span class="tag bad">Not connected</span>';
+  $('mqttTag').innerHTML=!m.configured?'<span class="tag warn">Not set up</span>':m.connected?'<span class="tag ok">Connected</span>':'<span class="tag bad">Not connected</span>';
+  const why={'-4':'the connection timed out','-3':'the connection dropped','-2':'the broker can\'t be reached: check the address and port','-1':'it disconnected','1':'the broker rejected the protocol','2':'the broker rejected the client ID','3':'the broker is unavailable','4':'the username or password is wrong','5':'the broker refused: check the username and password'};
+  $('mqttMsg').innerHTML=!m.configured?'<span class="muted">Enter the Mosquitto broker on Home Assistant. Blinds then appear in Home Assistant automatically.</span>':m.connected?'<span style="color:var(--ok)">Connected. Your blinds are in Home Assistant under MQTT devices.</span>':`<span style="color:var(--bad)">Not connected: ${why[m.state]||'trying to connect'}.</span>`;
+  $('radioTag').innerHTML=r.ready?'<span class="tag ok">Working</span>':'<span class="tag bad">Not detected</span>';
+  $('radioMsg').innerHTML=r.ready?'':banner('bad','alert','<b>The ESP32 can\'t talk to the CC1101.</b> Check VCC is on 3V3, then SCK, MISO, MOSI and CSN. MISO and MOSI swapped is the usual cause.');
+  $('radioKv').innerHTML=`<dt>Frequency</dt><dd>${(+r.mhz).toFixed(2)} MHz</dd><dt>Last sent</dt><dd>${r.last_tx_ago_s>=0?ago(r.last_tx_ago_s):'Not yet'}</dd><dt>Last heard</dt><dd>${r.last_rx_ago_s>=0?ago(r.last_rx_ago_s):'Nothing yet'}</dd>${r.overflow?`<dt>Dropped signals</dt><dd>${r.overflow}</dd>`:''}`;
+  const reasons={1:'Power on',3:'Software restart',4:'Crash',5:'Crash',6:'Watchdog',7:'Watchdog',8:'Deep sleep',9:'Low voltage',10:'Other'};
+  $('fwKv').innerHTML=`<dt>Version</dt><dd>${esc(S.fw)}</dd><dt>Running for</dt><dd>${dur(S.uptime)}</dd><dt>Last start</dt><dd>${reasons[S.reset_reason]||'Unknown'}</dd><dt>Free memory</dt><dd>${Math.round(S.heap/1024)} kB</dd><dt>IP address</dt><dd>${esc(w.connected?w.ip:'192.168.4.1 (setup)')}</dd>`;
+}
+async function scan(){
+  const b=$('scanBtn'),sel=$('scanSel');b.disabled=true;b.textContent='Scanning…';
+  try{for(let i=0;i<25;i++){const j=await (await fetch('/api/scan',{cache:'no-store'})).json();
+    if(!j.scanning){const n=(j.networks||[]).sort((a,c)=>c.rssi-a.rssi);
+      sel.innerHTML=`<option value="">${n.length?`Choose a network (${n.length} found)`:'No networks found'}</option>`+n.map(x=>`<option value="${esc(x.ssid)}">${esc(x.ssid)} · ${x.rssi>-60?'strong':x.rssi>-72?'good':'weak'} (${x.rssi} dBm)${x.secure?'':' · open'}</option>`).join('');break}
+    await new Promise(r=>setTimeout(r,700))}}catch(e){toast('Scan failed',true)}
+  b.disabled=false;b.textContent='Scan';
+}
+async function saveNet(which){
+  const b={},v=k=>$('n_'+k).value.trim();
+  if(which=='wifi'){if(!v('ssid'))return toast('Enter the network name',true);b.ssid=v('ssid');if($('n_pass').value)b.pass=$('n_pass').value}
+  if(which=='mqtt'){b.mqtt_host=v('mqtt_host');b.mqtt_port=parseInt(v('mqtt_port'))||1883;b.mqtt_user=v('mqtt_user');if($('n_mqtt_pass').value)b.mqtt_pass=$('n_mqtt_pass').value;b.base_topic=v('base_topic');b.discovery_prefix=v('discovery_prefix')}
+  if(which=='device'){b.hostname=v('hostname');if($('n_admin').value)b.admin_pass=$('n_admin').value}
+  const j=await api('/api/network',b);
+  if(j){toast(j.rebooting?'Saved. Restarting…':'Saved');document.querySelectorAll('#s-settings input').forEach(e=>{delete e.dataset.touched;if(e.type=='password')e.value=''});loadConfig()}
+}
+async function savePins(){const b={};['sck','miso','mosi','cs','gdo0','gdo2','led','mhz','pa_dbm'].forEach(k=>b[k]=parseFloat($('p_'+k).value));const j=await api('/api/pins',b);if(j)toast('Saved. Restarting…')}
+function restart(){if(confirm('Restart the bridge? It takes about 10 seconds.'))api('/api/reboot',{}).then(j=>j&&toast('Restarting…'))}
+function upload(){
+  const f=$('fwFile').files[0];if(!f)return toast('Choose the .bin file first',true);
+  if(/factory/i.test(f.name)&&!confirm('This looks like the factory file, which is for USB flashing. Upload it anyway?'))return;
+  const x=new XMLHttpRequest(),fd=new FormData(),bar=$('fwProg');fd.append('firmware',f);
+  bar.style.display='block';$('fwBtn').disabled=true;$('fwMsg').textContent='Uploading…';
+  x.upload.onprogress=e=>{if(e.lengthComputable)bar.firstChild.style.width=(e.loaded/e.total*100)+'%'};
+  x.onload=()=>{$('fwBtn').disabled=false;const ok=x.status==200;$('fwMsg').textContent=ok?'Updated. The bridge is restarting; this page reloads in 15 seconds.':'Update failed: '+x.responseText;if(ok)setTimeout(()=>location.reload(),15000)};
+  x.onerror=()=>{$('fwBtn').disabled=false;$('fwMsg').textContent='Upload failed: the bridge stopped responding.'};
+  x.open('POST','/update');x.send(fd);
+}
+
+/* ---------- start ---------- */
+try{if(TABS.some(t=>t[0]==localStorage.tab))tab=localStorage.tab}catch(e){}
+go(tab);refresh();requestAnimationFrame(frame);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh()});
+</script>
+</body>
+</html>

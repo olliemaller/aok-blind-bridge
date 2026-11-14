@@ -17,11 +17,13 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <time.h>
+#include <stdarg.h>
 
 #include "aok_protocol.h"
-#include "web_ui.h"
+#include "web_ui_gz.h"
 
-#define FW_VERSION "1.0.2"
+#define FW_VERSION "1.1.0"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
 #ifndef DEFAULT_PIN_SCK
@@ -76,6 +78,7 @@ struct RemoteCfg {
   uint16_t base[3] = {0, 0, 0};
   aok::Timings timings;
   bool listen = true;
+  uint16_t seen = 0;  // channels this remote has been heard on
 };
 
 struct BlindCfg {
@@ -134,6 +137,18 @@ int calIndex = -1;
 Motion calMotion = Motion::Stopped;
 uint32_t calStartMs = 0;
 
+struct CalRecord { String name; bool opening = false; uint32_t ms = 0, previousMs = 0; time_t when = 0; };
+constexpr size_t kCalHistory = 20;
+CalRecord calHistory[kCalHistory];
+size_t calHistoryCount = 0;
+
+// in-memory log shown on the Logs page
+constexpr size_t kLogLines = 120;
+struct LogLine { uint32_t seq = 0, ms = 0; time_t when = 0; char level = 'I'; String text; };
+LogLine logLines[kLogLines];
+uint32_t logSeq = 0;
+bool ntpStarted = false;
+
 // RX ring buffer filled by the GDO2 edge interrupt
 volatile uint32_t ring[kRingSize];
 volatile uint16_t ringHead = 0, ringTail = 0;
@@ -181,6 +196,34 @@ bool remoteComplete() { return remote.have[0] && remote.have[1] && remote.have[2
 
 void ledSet(bool on) { if (pins.led >= 0) digitalWrite(pins.led, on ? HIGH : LOW); }
 
+time_t wallClock() { const time_t t = time(nullptr); return t > 1700000000 ? t : 0; }
+
+void logf(char level, const char* fmt, ...) {
+  char buf[220];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  Serial.printf("[%c] %s\n", level, buf);
+  LogLine& l = logLines[logSeq % kLogLines];
+  l.seq = ++logSeq; l.ms = millis(); l.when = wallClock(); l.level = level; l.text = buf;
+}
+#define LOGI(...) logf('I', __VA_ARGS__)
+#define LOGW(...) logf('W', __VA_ARGS__)
+#define LOGE(...) logf('E', __VA_ARGS__)
+
+// what a received frame was, including buttons the bridge doesn't act on
+const char* frameKind(const aok::Frame& f) {
+  switch ((f.command >> 8) & 0xFF) {
+    case 0xF4: return "up";
+    case 0xBC: return "down";
+    case 0xDC: return "stop";
+    case 0xAC: return "program";
+    case 0xDB: return "release";
+    default: return "other";
+  }
+}
+
 // ---------------------------------------------------------------- persistence
 void saveNet() {
   JsonDocument d;
@@ -214,6 +257,8 @@ void loadPins() {
   pins.led = d["led"] | pins.led; pins.mhz = d["mhz"] | pins.mhz; pins.paDbm = d["pa"] | pins.paDbm;
 }
 
+uint16_t parseChannels(const String& text);
+
 void remoteToJson(JsonObject o) {
   o["prefix"] = hex(remote.prefix, 6);
   o["remote_id"] = hex(remote.remoteId, 2);
@@ -221,6 +266,7 @@ void remoteToJson(JsonObject o) {
   o["close"] = remote.have[1] ? hex(remote.base[1], 4) : "";
   o["stop"] = remote.have[2] ? hex(remote.base[2], 4) : "";
   o["listen"] = remote.listen;
+  o["seen"] = maskText(remote.seen);
   JsonObject t = o["timings"].to<JsonObject>();
   t["short"] = remote.timings.shortUs; t["long"] = remote.timings.longUs;
   t["sync_high"] = remote.timings.syncHighUs; t["sync_low"] = remote.timings.syncLowUs;
@@ -238,6 +284,7 @@ void remoteFromJson(JsonObjectConst o) {
     remote.base[a] = remote.have[a] ? parseHex(v) : 0;
   }
   if (o["listen"].is<bool>()) remote.listen = o["listen"];
+  if (o["seen"].is<const char*>()) remote.seen = parseChannels(o["seen"].as<String>());
   JsonObjectConst t = o["timings"];
   if (!t.isNull()) {
     remote.timings.shortUs = t["short"] | remote.timings.shortUs;
@@ -340,6 +387,35 @@ void loadPositions() {
   }
 }
 
+void saveCalHistory() {
+  JsonDocument d; JsonArray a = d.to<JsonArray>();
+  for (size_t k = 0; k < calHistoryCount; ++k) {
+    JsonObject o = a.add<JsonObject>();
+    o["n"] = calHistory[k].name; o["o"] = calHistory[k].opening; o["ms"] = calHistory[k].ms;
+    o["pm"] = calHistory[k].previousMs; o["t"] = static_cast<uint32_t>(calHistory[k].when);
+  }
+  String s; serializeJson(d, s); prefs.putString("calhist", s);
+}
+
+void loadCalHistory() {
+  JsonDocument d;
+  if (deserializeJson(d, prefs.getString("calhist", "[]"))) return;
+  calHistoryCount = 0;
+  for (JsonObjectConst o : d.as<JsonArrayConst>()) {
+    if (calHistoryCount >= kCalHistory) break;
+    CalRecord& r = calHistory[calHistoryCount++];
+    r.name = o["n"] | ""; r.opening = o["o"] | false; r.ms = o["ms"] | 0; r.previousMs = o["pm"] | 0;
+    r.when = static_cast<time_t>(o["t"] | 0);
+  }
+}
+
+void addCalRecord(const String& name, bool opening, uint32_t ms, uint32_t previousMs) {
+  if (calHistoryCount == kCalHistory) { for (size_t k = 1; k < kCalHistory; ++k) calHistory[k - 1] = calHistory[k]; calHistoryCount--; }
+  CalRecord& r = calHistory[calHistoryCount++];
+  r.name = name; r.opening = opening; r.ms = ms; r.previousMs = previousMs; r.when = wallClock();
+  saveCalHistory();
+}
+
 // ---------------------------------------------------------------- radio
 void IRAM_ATTR onEdge() {
   const uint32_t now = micros();
@@ -374,7 +450,7 @@ void setupRadio() {
   ELECHOUSE_cc1101.setSpiPin(pins.sck, pins.miso, pins.mosi, pins.cs);
   ELECHOUSE_cc1101.Init();
   radioReady = ELECHOUSE_cc1101.getCC1101();
-  if (!radioReady) { Serial.println("CC1101 not detected — check wiring"); return; }
+  if (!radioReady) { LOGE("CC1101 radio not detected: check the wiring (SCK %d, MISO %d, MOSI %d, CSN %d)", pins.sck, pins.miso, pins.mosi, pins.cs); return; }
   ELECHOUSE_cc1101.setCCMode(0);       // asynchronous serial mode (raw OOK on the GDO pins)
   ELECHOUSE_cc1101.setModulation(2);   // ASK/OOK
   ELECHOUSE_cc1101.setMHZ(pins.mhz);
@@ -387,7 +463,7 @@ void setupRadio() {
   // GDO2 = received data out; GDO0 = high impedance in RX (it becomes the TX data input when transmitting)
   ELECHOUSE_cc1101.SpiWriteReg(0x00, 0x0D);  // IOCFG2
   ELECHOUSE_cc1101.SpiWriteReg(0x02, 0x2E);  // IOCFG0
-  Serial.printf("CC1101 ready at %.2f MHz\n", pins.mhz);
+  LOGI("CC1101 radio ready at %.2f MHz", pins.mhz);
   rxStart();
 }
 
@@ -420,7 +496,7 @@ bool sendAction(uint16_t mask, aok::Action action, String& err) {
   if (a > 2) { err = "unknown action"; return false; }
   if (!remote.have[a]) { err = String("remote not learned yet: ") + aok::actionName(action); return false; }
   const uint64_t payload = aok::makePayload(remote.prefix, remote.remoteId, mask, remote.base[a]);
-  Serial.printf("TX %s channels=%s payload=%s\n", aok::actionName(action), maskText(mask).c_str(), hex(payload, 16).c_str());
+  LOGI("Sent %s on channel %s", action == aok::Action::Open ? "Up" : action == aok::Action::Close ? "Down" : "Stop", maskText(mask).c_str());
   return transmitPayload(payload, err);
 }
 
@@ -712,7 +788,8 @@ void onMqtt(char* t, byte* payload, unsigned int len) {
   for (size_t i = 0; i < blindCount; ++i) {
     if (tp == blindTopic(i, "set") || tp == blindTopic(i, "set_position")) {
       String err;
-      if (!handleBlindCommand(i, msg, "home_assistant", err)) Serial.printf("[%s] %s\n", cfg[i].id.c_str(), err.c_str());
+      LOGI("Home Assistant: %s → %s", cfg[i].name.c_str(), msg.c_str());
+      if (!handleBlindCommand(i, msg, "home_assistant", err)) LOGW("%s: %s", cfg[i].name.c_str(), err.c_str());
       return;
     }
   }
@@ -729,8 +806,13 @@ void ensureMqtt() {
   bool ok = net.mqttUser.length()
     ? mqtt.connect(clientId.c_str(), net.mqttUser.c_str(), net.mqttPass.c_str(), will.c_str(), 0, true, "offline")
     : mqtt.connect(clientId.c_str(), will.c_str(), 0, true, "offline");
-  if (!ok) { Serial.printf("MQTT connect failed state=%d\n", mqtt.state()); return; }
-  Serial.println("MQTT connected");
+  if (!ok) {
+    const int st = mqtt.state();
+    const char* why = st == 5 ? "username or password rejected" : st == 4 ? "bad username or password" : st == -2 ? "broker not reachable" : st == -4 ? "connection timed out" : "connection failed";
+    LOGW("MQTT %s:%u: %s (code %d)", net.mqttHost.c_str(), net.mqttPort, why, st);
+    return;
+  }
+  LOGI("MQTT connected to %s:%u", net.mqttHost.c_str(), net.mqttPort);
   mqtt.publish(will.c_str(), "online", true);
   mqtt.subscribe(topic("learn/set").c_str());
   for (size_t i = 0; i < blindCount; ++i) {
@@ -834,20 +916,23 @@ void onPayload(uint64_t payload) {
 
   if (learnMode) {
     const bool sameRemote = f.prefix == remote.prefix && f.remoteId == remote.remoteId;
-    if (!sameRemote) for (bool& h : remote.have) h = false;
+    if (!sameRemote) { for (bool& h : remote.have) h = false; remote.seen = 0; }
     remote.prefix = f.prefix;
     remote.remoteId = f.remoteId;
     const int a = static_cast<int>(f.action);
     remote.base[a] = aok::deriveBase(f.remoteId, f.mask, f.command);
     remote.have[a] = true;
+    remote.seen |= f.mask;
     saveRemote();
     learnStatus = String("learned ") + aok::actionName(f.action) + " from remote " + hex(f.remoteId, 2) + " (channel " + maskText(f.mask) + ")";
     if (remoteComplete()) { learnMode = false; learnStatus = "complete"; }
-    Serial.println(learnStatus);
+    LOGI("Remote learning: %s", learnStatus.c_str());
     return;
   }
 
   if (!matched) return;
+  if ((remote.seen | f.mask) != remote.seen) { remote.seen |= f.mask; saveRemote(); }
+  LOGI("Remote: %s on channel %s", f.action == aok::Action::Open ? "Up" : f.action == aok::Action::Close ? "Down" : "Stop", maskText(f.mask).c_str());
   lastEventText = String(aok::actionName(f.action)) + " · channel " + maskText(f.mask);
   if (mqtt.connected()) {
     JsonDocument d;
@@ -897,6 +982,7 @@ bool bodyJson(JsonDocument& d) {
 void handleState() {
   JsonDocument d;
   d["fw"] = FW_VERSION; d["uptime"] = millis() / 1000; d["heap"] = ESP.getFreeHeap();
+  d["reset_reason"] = static_cast<int>(esp_reset_reason());
   JsonObject w = d["wifi"].to<JsonObject>();
   w["connected"] = WiFi.status() == WL_CONNECTED; w["ssid"] = net.ssid; w["ip"] = WiFi.localIP().toString();
   w["rssi"] = WiFi.RSSI(); w["ap"] = apMode; w["hostname"] = net.hostname;
@@ -904,6 +990,8 @@ void handleState() {
   m["configured"] = net.mqttHost.length() > 0; m["connected"] = mqtt.connected(); m["state"] = mqtt.state();
   JsonObject r = d["radio"].to<JsonObject>();
   r["ready"] = radioReady; r["overflow"] = static_cast<uint32_t>(ringOverflow); r["mhz"] = pins.mhz;
+  r["last_tx_ago_s"] = lastTxMs ? (millis() - lastTxMs) / 1000 : -1;
+  r["last_rx_ago_s"] = lastRxFlashMs ? (millis() - lastRxFlashMs) / 1000 : -1;
   JsonObject rm = d["remote"].to<JsonObject>();
   remoteToJson(rm);
   rm["complete"] = remoteComplete(); rm["learning"] = learnMode; rm["learn_status"] = learnStatus;
@@ -914,6 +1002,11 @@ void handleState() {
     int pos; Motion mo; displayState(i, pos, mo);
     o["position"] = pos; o["motion"] = motionName(mo); o["target"] = st[i].target; o["source"] = st[i].lastSource;
     o["group"] = __builtin_popcount(cfg[i].mask) > 1;
+    if (mo != Motion::Stopped && pos >= 0) {
+      // lets the page animate smoothly between polls: % per second and where the run ends
+      o["rate"] = 100000.0f / static_cast<float>(travelMs(i, mo));
+      o["goal"] = (st[i].autoStop && st[i].motion == mo) ? st[i].target : (mo == Motion::Opening ? 100 : 0);
+    }
   }
   JsonArray fr = d["frames"].to<JsonArray>();
   for (size_t k = 0; k < frameCount; ++k) {
@@ -921,11 +1014,22 @@ void handleState() {
     JsonObject o = fr.add<JsonObject>();
     o["ago_s"] = (millis() - h.ms) / 1000; o["payload"] = hex(h.f.payload, 16); o["remote_id"] = hex(h.f.remoteId, 2);
     o["prefix"] = hex(h.f.prefix, 6); o["channels"] = maskText(h.f.mask); o["action"] = aok::actionName(h.f.action);
-    o["matched"] = h.matched; o["repeats"] = h.repeats;
+    o["matched"] = h.matched; o["repeats"] = h.repeats; o["kind"] = frameKind(h.f);
+    o["code"] = hex((h.f.command >> 8) & 0xFF, 2);
+    if (wallClock()) o["when"] = static_cast<uint32_t>(wallClock() - (millis() - h.ms) / 1000);
   }
+  JsonArray ch = d["cal_history"].to<JsonArray>();
+  for (size_t k = 0; k < calHistoryCount; ++k) {
+    JsonObject o = ch.add<JsonObject>();
+    o["name"] = calHistory[k].name; o["direction"] = calHistory[k].opening ? "open" : "close";
+    o["ms"] = calHistory[k].ms; o["previous_ms"] = calHistory[k].previousMs;
+    if (calHistory[k].when) o["when"] = static_cast<uint32_t>(calHistory[k].when);
+  }
+  d["time"] = static_cast<uint32_t>(wallClock());
+  d["log_seq"] = logSeq;
   JsonObject c = d["calibration"].to<JsonObject>();
   c["active"] = calIndex >= 0;
-  if (calIndex >= 0) { c["id"] = cfg[calIndex].id; c["direction"] = motionName(calMotion); c["elapsed_ms"] = millis() - calStartMs; }
+  if (calIndex >= 0) { c["id"] = cfg[calIndex].id; c["name"] = cfg[calIndex].name; c["direction"] = motionName(calMotion); c["elapsed_ms"] = millis() - calStartMs; }
   sendJson(d);
 }
 
@@ -963,6 +1067,7 @@ void handleNetworkPost() {
   if (d["base_topic"].is<const char*>() && d["base_topic"].as<String>().length()) net.base = slug(d["base_topic"].as<String>());
   if (d["discovery_prefix"].is<const char*>() && d["discovery_prefix"].as<String>().length()) net.discovery = d["discovery_prefix"].as<String>();
   saveNet();
+  LOGI("Network settings saved%s", reboot ? ", restarting" : "");
   if (mqtt.connected()) mqtt.disconnect();
   lastMqttTryMs = 0;
   if (reboot) scheduleReboot(2000);
@@ -984,9 +1089,9 @@ void handleRemotePost() {
   if (!authed()) return;
   JsonDocument d; if (!bodyJson(d)) return;
   const String action = d["action"] | "";
-  if (action == "learn") { learnMode = true; learnStartedMs = millis(); learnStatus = "waiting"; }
+  if (action == "learn") { learnMode = true; learnStartedMs = millis(); learnStatus = "waiting"; LOGI("Remote learning started"); }
   else if (action == "cancel") { learnMode = false; learnStatus = "cancelled"; }
-  else if (action == "forget") { for (bool& h : remote.have) h = false; remote.prefix = 0; remote.remoteId = 0; saveRemote(); learnStatus = "idle"; }
+  else if (action == "forget") { for (bool& h : remote.have) h = false; remote.prefix = 0; remote.remoteId = 0; remote.seen = 0; saveRemote(); learnStatus = "idle"; LOGI("Remote forgotten"); }
   else if (action == "save") { remoteFromJson(d["remote"].as<JsonObjectConst>()); saveRemote(); }
   else { sendError("unknown action"); return; }
   sendOk();
@@ -999,6 +1104,7 @@ void handleBlindsPost() {
   if (!blindsFromJson(d["blinds"].as<JsonArrayConst>(), err)) { sendError(err); return; }
   saveBlinds();
   savePositions();
+  LOGI("Blinds saved (%u)", static_cast<unsigned>(blindCount));
   if (mqtt.connected()) mqtt.disconnect();  // reconnect re-subscribes and republishes discovery
   lastMqttTryMs = 0;
   sendOk();
@@ -1010,7 +1116,8 @@ void handleCommandPost() {
   const int i = findBlind(d["id"] | "");
   if (i < 0) { sendError("unknown blind"); return; }
   String err;
-  if (!handleBlindCommand(i, d["cmd"].as<String>(), "web", err)) { sendError(err); return; }
+  LOGI("Web page: %s → %s", cfg[i].name.c_str(), d["cmd"].as<String>().c_str());
+  if (!handleBlindCommand(i, d["cmd"].as<String>(), "web", err)) { LOGW("%s: %s", cfg[i].name.c_str(), err.c_str()); sendError(err); return; }
   sendOk();
 }
 
@@ -1039,11 +1146,17 @@ void handleCalibratePost() {
     if (!sendAction(cfg[i].mask, rfFor(i, calMotion), err)) { sendError(err); return; }
     calIndex = i;
     calStartMs = millis();
+    LOGI("Calibration started: %s %s", cfg[i].name.c_str(), calMotion == Motion::Opening ? "opening" : "closing");
     applyAction(cfg[i].mask, rfFor(i, calMotion), "calibration", -1, -1);
     sendOk();
   } else if (action == "done" && calIndex >= 0) {
     const uint32_t ms = millis() - calStartMs;
-    if (calMotion == Motion::Opening) cfg[calIndex].openMs = ms; else cfg[calIndex].closeMs = ms;
+    if (ms < 1000) { sendError("that was under a second: press It's stopped when the blind stops moving"); return; }
+    const bool opening = calMotion == Motion::Opening;
+    const uint32_t previous = opening ? cfg[calIndex].openMs : cfg[calIndex].closeMs;
+    if (opening) cfg[calIndex].openMs = ms; else cfg[calIndex].closeMs = ms;
+    addCalRecord(cfg[calIndex].name, opening, ms, previous);
+    LOGI("Calibrated %s: %s takes %.1f s (was %.1f s)", cfg[calIndex].name.c_str(), opening ? "opening" : "closing", ms / 1000.0, previous / 1000.0);
     const int p = calMotion == Motion::Opening ? 100 : 0;
     st[calIndex].motion = Motion::Stopped;
     st[calIndex].position = st[calIndex].startPos = st[calIndex].target = p;
@@ -1052,8 +1165,10 @@ void handleCalibratePost() {
     savePositions();
     JsonDocument r; r["ok"] = true; r["measured_ms"] = ms; sendJson(r);
     calIndex = -1;
+  } else if (action == "clear_history") {
+    calHistoryCount = 0; saveCalHistory(); sendOk();
   } else if (action == "cancel") {
-    if (calIndex >= 0) stopBlind(calIndex, "calibration", err);
+    if (calIndex >= 0) { stopBlind(calIndex, "calibration", err); LOGI("Calibration cancelled"); }
     calIndex = -1;
     sendOk();
   } else sendError("unknown action");
@@ -1089,11 +1204,42 @@ void handleScan() {
   web.send(200, "application/json", out);
 }
 
-void handleReboot() { if (!authed()) return; sendOk(); scheduleReboot(800); }
+void handleReboot() { if (!authed()) return; LOGI("Restart requested from the web page"); sendOk(); scheduleReboot(800); }
+
+void handleLog() {
+  if (!authed()) return;
+  const uint32_t after = web.hasArg("after") ? strtoul(web.arg("after").c_str(), nullptr, 10) : 0;
+  const bool text = web.hasArg("format") && web.arg("format") == "text";
+  const uint32_t first = logSeq > kLogLines ? logSeq - kLogLines + 1 : 1;
+  if (text) {
+    String out;
+    for (uint32_t s = first; s <= logSeq; ++s) {
+      const LogLine& l = logLines[(s - 1) % kLogLines];
+      char head[40];
+      if (l.when) { struct tm tmv; localtime_r(&l.when, &tmv); strftime(head, sizeof(head), "%Y-%m-%d %H:%M:%S", &tmv); }
+      else snprintf(head, sizeof(head), "+%lu.%03lus", static_cast<unsigned long>(l.ms / 1000), static_cast<unsigned long>(l.ms % 1000));
+      out += head; out += ' '; out += l.level; out += ' '; out += l.text; out += '\n';
+    }
+    web.sendHeader("Content-Disposition", "attachment; filename=motolux-bridge-log.txt");
+    web.send(200, "text/plain", out);
+    return;
+  }
+  JsonDocument d;
+  d["seq"] = logSeq; d["uptime_ms"] = millis(); d["time"] = static_cast<uint32_t>(wallClock());
+  JsonArray a = d["lines"].to<JsonArray>();
+  for (uint32_t s = max(first, after + 1); s <= logSeq; ++s) {
+    const LogLine& l = logLines[(s - 1) % kLogLines];
+    JsonObject o = a.add<JsonObject>();
+    o["seq"] = l.seq; o["ms"] = l.ms; o["level"] = String(l.level); o["text"] = l.text;
+    if (l.when) o["when"] = static_cast<uint32_t>(l.when);
+  }
+  sendJson(d);
+}
 
 void handleUpdateDone() {
   if (!authed()) return;
   const bool ok = !Update.hasError();
+  if (ok) LOGI("Firmware updated, restarting"); else LOGE("Firmware update failed: %s", Update.errorString());
   web.send(ok ? 200 : 500, "text/plain", ok ? "Update OK — rebooting" : "Update failed");
   if (ok) scheduleReboot(1000);
 }
@@ -1101,14 +1247,15 @@ void handleUpdateDone() {
 void handleUpdateUpload() {
   if (net.adminPass.length() && !web.authenticate("admin", net.adminPass.c_str())) return;
   HTTPUpload& up = web.upload();
-  if (up.status == UPLOAD_FILE_START) { rxStop(); Update.begin(UPDATE_SIZE_UNKNOWN); }
+  if (up.status == UPLOAD_FILE_START) { LOGI("Firmware upload started: %s", up.filename.c_str()); rxStop(); Update.begin(UPDATE_SIZE_UNKNOWN); }
   else if (up.status == UPLOAD_FILE_WRITE) Update.write(up.buf, up.currentSize);
   else if (up.status == UPLOAD_FILE_END) Update.end(true);
 }
 
 void handleRoot() {
   web.sendHeader("Cache-Control", "no-cache");
-  web.send_P(200, "text/html", WEB_UI_HTML);
+  web.sendHeader("Content-Encoding", "gzip");
+  web.send_P(200, "text/html", reinterpret_cast<const char*>(WEB_UI_GZ), WEB_UI_GZ_LEN);
 }
 
 void handleNotFound() {
@@ -1129,6 +1276,7 @@ void setupWeb() {
   web.on("/api/calibrate", HTTP_POST, handleCalibratePost);
   web.on("/api/reboot", HTTP_POST, handleReboot);
   web.on("/api/scan", HTTP_GET, handleScan);
+  web.on("/api/log", HTTP_GET, handleLog);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   // Phones and Windows probe these when they join the setup Wi-Fi; answering them
   // directly opens the setup page and stops "request handler not found" log spam.
@@ -1149,7 +1297,7 @@ void startAp() {
   WiFi.softAP(name.c_str());
   dns.start(53, "*", WiFi.softAPIP());
   apMode = true;
-  Serial.printf("Setup Wi-Fi '%s' at http://%s\n", name.c_str(), WiFi.softAPIP().toString().c_str());
+  LOGI("Setup Wi-Fi '%s' open at http://%s", name.c_str(), WiFi.softAPIP().toString().c_str());
 }
 
 void stopAp() {
@@ -1172,7 +1320,14 @@ void setupWifi() {
 
 void maintainWifi() {
   const bool up = WiFi.status() == WL_CONNECTED;
+  static bool wasUp = false;
+  if (up != wasUp) {
+    wasUp = up;
+    if (up) LOGI("Wi-Fi connected to %s, IP %s, signal %d dBm", net.ssid.c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    else if (net.ssid.length()) LOGW("Wi-Fi disconnected from %s", net.ssid.c_str());
+  }
   if (up) {
+    if (!ntpStarted) { configTzTime("AEST-10AEDT,M10.1.0,M4.1.0/3", "pool.ntp.org", "time.google.com"); ntpStarted = true; }
     if (apMode && millis() - staStartMs > 5000) stopAp();
     if (!mdnsReady && MDNS.begin(net.hostname.c_str())) { MDNS.addService("http", "tcp", 80); mdnsReady = true; }
     if (!otaReady) {
@@ -1183,6 +1338,7 @@ void maintainWifi() {
       otaReady = true;
     }
   } else if (net.ssid.length() && !apMode && millis() - staStartMs > 45000) {
+    LOGW("Can't join %s after 45 s: opening the setup Wi-Fi as well", net.ssid.c_str());
     startAp();  // can't join — open the setup portal but keep trying the home network
   }
   if (apMode) dns.processNextRequest();
@@ -1205,13 +1361,20 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(150);
-  Serial.printf("\nMotolux Blind Bridge %s\n", FW_VERSION);
+  Serial.println();
   prefs.begin("aok", false);
   loadNet();
   loadPins();
   loadRemote();
   loadBlinds();
   loadPositions();
+  loadCalHistory();
+  {
+    const esp_reset_reason_t rr = esp_reset_reason();
+    const char* why = rr == ESP_RST_POWERON ? "power on" : rr == ESP_RST_SW ? "restart" : rr == ESP_RST_BROWNOUT ? "low voltage"
+      : (rr == ESP_RST_PANIC ? "crash" : (rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT) ? "watchdog" : "other");
+    LOGI("Motolux Blind Bridge %s started after %s, %u blinds", FW_VERSION, why, static_cast<unsigned>(blindCount));
+  }
   if (pins.led >= 0) { pinMode(pins.led, OUTPUT); ledSet(true); }
   setupRadio();
   setupWifi();
