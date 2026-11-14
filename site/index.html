@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A-OK Blind Bridge: install</title>
+<meta name="description" content="Local Home Assistant control for 433 MHz A-OK blind motors (Motolux and others) with an ESP32 and a CC1101. Install from your browser.">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.5.2/dist/web/install-button.js?module"></script>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--line:#e3e6eb;--text:#14171c;--text2:#59606b;--acc:#1f6feb;--warn-bg:#fdf3e1;--warn:#9a6100;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+@media (prefers-color-scheme:dark){:root{--bg:#101214;--panel:#181b1f;--line:#2a2f36;--text:#eceef1;--text2:#a4abb5;--acc:#4c8dff;--warn-bg:#2d2312;--warn:#e5ad4a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.6 var(--font);-webkit-font-smoothing:antialiased}
+main{max-width:760px;margin:0 auto;padding:48px 20px 64px}
+h1{font-size:30px;letter-spacing:-.02em;margin:16px 0 6px;font-weight:650}
+h2{font-size:17px;margin:0 0 10px;font-weight:600}
+.lead{color:var(--text2);font-size:16.5px;margin:0 0 28px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;margin-bottom:14px}
+ol{margin:0;padding-left:20px}li{margin:6px 0}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;background:var(--bg);padding:1px 5px;border-radius:5px}
+a{color:var(--acc)}
+.install{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;height:42px;padding:0 18px;border-radius:10px;background:var(--acc);color:#fff;font:inherit;font-weight:600;border:0;cursor:pointer}
+.note{background:var(--warn-bg);color:var(--warn);border-radius:10px;padding:10px 14px;font-size:14px;margin-top:14px}
+table{border-collapse:collapse;width:100%;font-size:14px}td,th{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}th{color:var(--text2);font-weight:500}
+.muted{color:var(--text2);font-size:14px}
+</style>
+</head>
+<body>
+<main>
+  <svg width="44" height="44" viewBox="0 0 30 30" aria-hidden="true"><rect width="30" height="30" rx="8" fill="#1f6feb"/><rect x="8" y="7" width="14" height="2.2" rx="1" fill="#fff"/><rect x="9" y="9" width="12" height="9" fill="#fff" opacity=".85"/><rect x="9" y="18" width="12" height="1.6" rx=".8" fill="#fff"/><rect x="8" y="22" width="14" height="1.4" rx=".7" fill="#fff" opacity=".6"/></svg>
+  <h1>A-OK Blind Bridge</h1>
+  <p class="lead">Local control of 433 MHz A-OK blind motors (sold as Motolux and under other names) from Home Assistant, using an ESP32 and a CC1101 radio. No cloud, no hub.</p>
+
+  <div class="card">
+    <h2>Install</h2>
+    <ol>
+      <li>Wire the CC1101 to the ESP32 as shown below.</li>
+      <li>Plug the ESP32 into this computer with a USB data cable.</li>
+      <li>Press <b>Install</b>, pick the serial port, then enter your Wi-Fi when asked.</li>
+    </ol>
+    <div class="install" style="margin-top:16px">
+      <esp-web-install-button manifest="firmware/manifest.json">
+        <button slot="activate" class="btn">Install</button>
+        <span slot="unsupported">Your browser can't flash devices. Use Chrome or Edge on a computer.</span>
+        <span slot="not-allowed">Open this page over https to install.</span>
+      </esp-web-install-button>
+      <span class="muted" id="ver"></span>
+    </div>
+    <p class="note">If it can't connect, hold the <b>BOOT</b> button on the ESP32 while you press Install. On Windows you may need the CP210x or CH340 USB driver.</p>
+  </div>
+
+  <div class="card">
+    <h2>Wiring</h2>
+    <p class="muted" style="margin-top:0">Power the CC1101 from 3V3, never 5V.</p>
+    <table>
+      <tr><th>CC1101</th><th>ESP32 (HW-395 / DevKit)</th></tr>
+      <tr><td>1 GND</td><td>GND</td></tr>
+      <tr><td>2 VCC</td><td>3V3</td></tr>
+      <tr><td>3 GDO0</td><td>GPIO 12</td></tr>
+      <tr><td>4 CSN</td><td>GPIO 5</td></tr>
+      <tr><td>5 SCK</td><td>GPIO 18</td></tr>
+      <tr><td>6 MOSI</td><td>GPIO 23</td></tr>
+      <tr><td>7 MISO</td><td>GPIO 19</td></tr>
+      <tr><td>8 GDO2</td><td>GPIO 27</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>After installing</h2>
+    <ol>
+      <li>Open <code>http://aok-blinds.local</code> (or the address the installer shows).</li>
+      <li><b>Remote</b>: press Start learning, then Up, Down and Stop on your hand remote.</li>
+      <li><b>Set up blinds</b>: add one blind per remote channel.</li>
+      <li><b>Calibrate</b>: time each blind opening and closing.</li>
+      <li><b>Settings → Home Assistant</b>: enter your MQTT broker. The blinds appear in Home Assistant by themselves.</li>
+    </ol>
+    <p class="muted">Prefer ESPHome? See the <a href="https://github.com/olliemaller/aok-blind-bridge/blob/main/docs/esphome.md">ESPHome component</a>. Source, docs and protocol notes are on <a href="https://github.com/olliemaller/aok-blind-bridge">GitHub</a>.</p>
+  </div>
+</main>
+<script>
+fetch('firmware/manifest.json').then(r=>r.json()).then(m=>{document.getElementById('ver').textContent='Version '+m.version}).catch(()=>{});
+</script>
+</body>
+</html>

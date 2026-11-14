@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('platformio.ini') }}
+      - run: pip install platformio "esptool<5"
+      - name: Protocol tests
+        run: g++ -std=c++17 -Wall -Wextra -I include test/test_protocol.cpp -o /tmp/aok_test && /tmp/aok_test | tail -1
+      - name: Build firmware
+        run: tools/package.sh . dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: dist/*.bin
+
+  esphome:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install esphome
+      - name: Check the example config
+        run: esphome config esphome/example.yaml
+      - name: Compile the example
+        run: esphome compile esphome/example.yaml

@@ -1,0 +1,117 @@
+name: Release
+
+# Every push to main: if src/main.cpp has a version with no release yet, build it, publish a
+# GitHub release with the firmware files, and update the web installer on GitHub Pages.
+# Versions listed in .github/release-history.json (made before this workflow existed) are
+# released from their original commits the first time this runs.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      todo: ${{ steps.plan.outputs.todo }}
+      current: ${{ steps.plan.outputs.current }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=$(sed -n 's/^#define FW_VERSION "\(.*\)"/\1/p' src/main.cpp)
+          echo "current=v$ver" >> "$GITHUB_OUTPUT"
+          existing=$(gh release list --limit 200 --json tagName -q '.[].tagName' || true)
+          todo=$(jq -c --arg cur "v$ver" --arg sha "$GITHUB_SHA" --arg have "$existing" '
+            (. + [{tag: $cur, sha: $sha}])
+            | map(select(.tag as $t | ($have | split("\n") | index($t)) | not))' .github/release-history.json)
+          echo "todo=$todo" >> "$GITHUB_OUTPUT"
+          echo "To release: $todo"
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.todo != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        rel: ${{ fromJSON(needs.plan.outputs.todo) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('platformio.ini') }}
+      - run: pip install platformio "esptool<5"
+      - name: Build ${{ matrix.rel.tag }}
+        run: |
+          git worktree add /tmp/src ${{ matrix.rel.sha }}
+          tools/package.sh /tmp/src dist
+      - name: Release notes
+        run: |
+          v=${{ matrix.rel.tag }}; v=${v#v}
+          awk -v v="$v" '$0 ~ "^## \\[?"v"\\]?" {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          printf '\n---\n**Install:** flash `aok-blind-bridge-%s-factory.bin` at 0x0 from the [web installer](https://olliemaller.github.io/aok-blind-bridge/) or esptool. **Update:** upload `aok-blind-bridge-%s-ota.bin` in the bridge'"'"'s Settings, or use *Check for updates*.\n' "$v" "$v" >> notes.md
+          cat notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest=false; [ "${{ matrix.rel.tag }}" = "${{ needs.plan.outputs.current }}" ] && latest=true
+          gh release create ${{ matrix.rel.tag }} dist/*.bin --target ${{ matrix.rel.sha }} \
+            --title "${{ matrix.rel.tag }}" --notes-file notes.md --latest=$latest
+
+  pages:
+    needs: [plan, release]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=${{ needs.plan.outputs.current }}; v=${tag#v}
+          mkdir -p site/firmware
+          gh release download "$tag" -D site/firmware -p '*.bin'
+          cp site/firmware/aok-blind-bridge-$v-factory.bin site/firmware/aok-blind-bridge-factory.bin
+          cp site/firmware/aok-blind-bridge-$v-ota.bin site/firmware/aok-blind-bridge-ota.bin
+          cat > site/firmware/manifest.json <<JSON
+          {
+            "name": "A-OK Blind Bridge",
+            "version": "$v",
+            "home_assistant_domain": "mqtt",
+            "new_install_prompt_erase": true,
+            "builds": [
+              { "chipFamily": "ESP32", "parts": [ { "path": "aok-blind-bridge-factory.bin", "offset": 0 } ] }
+            ],
+            "ota": "aok-blind-bridge-ota.bin",
+            "notes_url": "https://github.com/${{ github.repository }}/releases/tag/$tag"
+          }
+          JSON
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
