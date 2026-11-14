@@ -21,7 +21,7 @@
 #include "aok_protocol.h"
 #include "web_ui.h"
 
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.0.1"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
 #ifndef DEFAULT_PIN_SCK
@@ -1059,6 +1059,36 @@ void handleCalibratePost() {
   } else sendError("unknown action");
 }
 
+// Wi-Fi scan for the setup page: first call starts an async scan, later calls return results
+void handleScan() {
+  if (!authed()) return;
+  const int16_t n = WiFi.scanComplete();
+  JsonDocument d;
+  if (n == WIFI_SCAN_RUNNING) { d["scanning"] = true; }
+  else if (n < 0) {
+    if (!(WiFi.getMode() & WIFI_STA)) WiFi.mode(apMode ? WIFI_AP_STA : WIFI_STA);
+    WiFi.scanNetworks(true, false);
+    d["scanning"] = true;
+  } else {
+    JsonArray a = d["networks"].to<JsonArray>();
+    for (int i = 0; i < n; i++) {
+      const String ssid = WiFi.SSID(i);
+      if (!ssid.length()) continue;
+      bool dup = false;
+      for (JsonObject o : a) {
+        if (o["ssid"] == ssid) { dup = true; if (WiFi.RSSI(i) > o["rssi"].as<int>()) o["rssi"] = WiFi.RSSI(i); break; }
+      }
+      if (dup) continue;
+      JsonObject o = a.add<JsonObject>();
+      o["ssid"] = ssid; o["rssi"] = WiFi.RSSI(i); o["secure"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+    }
+    WiFi.scanDelete();
+    d["scanning"] = false;
+  }
+  String out; serializeJson(d, out);
+  web.send(200, "application/json", out);
+}
+
 void handleReboot() { if (!authed()) return; sendOk(); scheduleReboot(800); }
 
 void handleUpdateDone() {
@@ -1098,7 +1128,15 @@ void setupWeb() {
   web.on("/api/test", HTTP_POST, handleTestPost);
   web.on("/api/calibrate", HTTP_POST, handleCalibratePost);
   web.on("/api/reboot", HTTP_POST, handleReboot);
+  web.on("/api/scan", HTTP_GET, handleScan);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
+  // Phones and Windows probe these when they join the setup Wi-Fi; answering them
+  // directly opens the setup page and stops "request handler not found" log spam.
+  for (const char* probe : {"/generate_204", "/gen_204", "/hotspot-detect.html", "/library/test/success.html",
+                            "/connecttest.txt", "/ncsi.txt", "/redirect", "/fwlink", "/canonical.html",
+                            "/success.txt", "/favicon.ico"}) {
+    web.on(probe, HTTP_ANY, handleNotFound);
+  }
   web.onNotFound(handleNotFound);
   web.begin();
 }
@@ -1107,7 +1145,7 @@ void setupWeb() {
 void startAp() {
   if (apMode) return;
   const String name = String("AOK-Blinds-") + String(static_cast<uint32_t>(ESP.getEfuseMac() >> 24) & 0xFFFF, HEX);
-  WiFi.mode(net.ssid.length() ? WIFI_AP_STA : WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);  // STA side stays up so the setup page can scan for networks
   WiFi.softAP(name.c_str());
   dns.start(53, "*", WiFi.softAPIP());
   apMode = true;

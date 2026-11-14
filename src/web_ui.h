@@ -9,7 +9,7 @@ static const char WEB_UI_HTML[] PROGMEM = R"HTML(<!doctype html>
 @media (prefers-color-scheme:light){:root{--bg:#f4f5f7;--card:#fff;--line:#e2e4e9;--text:#16181d;--muted:#5f6672}}
 *{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
 header{padding:14px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--line)}
-header h1{font-size:17px;margin:0 auto 0 0}.chip{font-size:12px;padding:3px 9px;border-radius:99px;background:var(--card);border:1px solid var(--line);color:var(--muted)}
+header h1{font-size:17px;margin:0 auto 0 0}.chip{cursor:pointer;font:inherit;font-size:12px;padding:3px 9px;border-radius:99px;background:var(--card);border:1px solid var(--line);color:var(--muted)}
 .chip.ok{color:var(--ok)}.chip.bad{color:var(--bad)}.chip.warn{color:var(--warn)}
 nav{display:flex;gap:4px;padding:8px 12px;overflow-x:auto;border-bottom:1px solid var(--line)}
 nav button{background:none;border:0;color:var(--muted);padding:7px 11px;border-radius:8px;font:inherit;cursor:pointer;white-space:nowrap}
@@ -32,7 +32,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:7px 6px;b
 a{color:var(--acc)}td select{min-width:92px}
 #toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--card);border:1px solid var(--line);padding:10px 14px;border-radius:10px;display:none;max-width:90vw}
 </style></head><body>
-<header><h1>A-OK Blind Bridge</h1><span id="cWifi" class="chip">Wi-Fi</span><span id="cMqtt" class="chip">MQTT</span><span id="cRadio" class="chip">Radio</span><span id="cRemote" class="chip">Remote</span></header>
+<header><h1>A-OK Blind Bridge</h1><button id="cWifi" class="chip" onclick="show('net')">Wi-Fi</button><button id="cMqtt" class="chip" onclick="show('net')">MQTT</button><button id="cRadio" class="chip" onclick="show('radio')">Radio</button><button id="cRemote" class="chip" onclick="show('remote')">Remote</button></header>
 <nav id="nav"></nav>
 <main>
 <section id="s-blinds"><div id="blindCards" class="grid"></div><p id="noBlinds" class="note" style="display:none">No blinds yet. Learn your remote under <b>Remote</b>, then add blinds under <b>Set up blinds</b>.</p></section>
@@ -63,7 +63,7 @@ a{color:var(--acc)}td select{min-width:92px}
 <p class="big" id="calTimer"></p><p class="note" id="calResult"></p></div></section>
 
 <section id="s-net"><div class="card"><h3>Wi-Fi</h3>
-<label>Network name (SSID)</label><input id="n_ssid"><label>Password <span id="passSet"></span></label><input id="n_pass" type="password" placeholder="leave blank to keep">
+<label>Network name (SSID)</label><div class="row"><select id="n_scan" onchange="if(this.value)$('n_ssid').value=this.value" style="flex:1"><option value="">Press Scan to find networks</option></select><button class="b" id="scanBtn" onclick="scan()">Scan</button></div><input id="n_ssid" placeholder="or type the network name" style="margin-top:8px"><label>Password <span id="passSet"></span></label><input id="n_pass" type="password" placeholder="leave blank to keep">
 <label>Device name</label><input id="n_hostname"><label>Web page password (optional, user <code>admin</code>)</label><input id="n_admin" type="password" placeholder="leave blank for none">
 <h3 style="margin-top:18px">MQTT (Home Assistant)</h3>
 <label>Broker address</label><input id="n_mqtt_host" placeholder="192.168.0.202"><label>Port</label><input id="n_mqtt_port" type="number">
@@ -83,10 +83,11 @@ a{color:var(--acc)}td select{min-width:92px}
 const tabs=[['blinds','Blinds'],['remote','Remote'],['setup','Set up blinds'],['cal','Calibrate'],['net','Network'],['radio','Radio & firmware'],['log','Activity']];
 const $=id=>document.getElementById(id);let S=null,C=null,edit=null;
 $('nav').innerHTML=tabs.map(t=>`<button data-t="${t[0]}" onclick="show('${t[0]}')">${t[1]}</button>`).join('');
-function show(t){document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id=='s-'+t));document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t==t));try{localStorage.tab=t}catch(e){}if(t=='setup'||t=='net'||t=='radio')loadConfig()}
+function show(t){document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id=='s-'+t));document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t==t));try{localStorage.tab=t}catch(e){}if(t=='setup'||t=='net'||t=='radio')loadConfig();if(t=='net'&&S&&S.wifi.ap&&!$('n_scan').dataset.done){$('n_scan').dataset.done=1;scan()}}
 function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',3500)}
 async function post(u,b){try{const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false){toast(j.error||('Error '+r.status));return null}refresh();return j}catch(e){toast('Bridge not reachable');return null}}
 const cmd=(id,c)=>post('/api/command',{id,cmd:String(c)});
+async function scan(){const b=$('scanBtn'),sel=$('n_scan');b.disabled=true;b.textContent='Scanning…';try{for(let i=0;i<20;i++){const j=await (await fetch('/api/scan')).json();if(!j.scanning){const n=(j.networks||[]).sort((a,c)=>c.rssi-a.rssi);sel.innerHTML=`<option value="">${n.length?'Choose a network ('+n.length+' found)':'No networks found'}</option>`+n.map(x=>`<option value="${x.ssid.replace(/"/g,'&quot;')}">${x.ssid.replace(/</g,'&lt;')} · ${x.rssi} dBm${x.secure?' 🔒':''}</option>`).join('');break}await new Promise(r=>setTimeout(r,700))}}catch(e){toast('Scan failed')}b.disabled=false;b.textContent='Scan'}
 function chip(id,txt,cls){const e=$(id);e.textContent=txt;e.className='chip '+cls}
 function render(){
  chip('cWifi',S.wifi.ap?'Setup Wi-Fi':S.wifi.connected?'Wi-Fi '+S.wifi.rssi+' dBm':'Wi-Fi offline',S.wifi.connected?'ok':'warn');
