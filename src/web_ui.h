@@ -66,7 +66,7 @@ a{color:var(--acc)}td select{min-width:92px}
 <label>Network name (SSID)</label><input id="n_ssid"><label>Password <span id="passSet"></span></label><input id="n_pass" type="password" placeholder="leave blank to keep">
 <label>Device name</label><input id="n_hostname"><label>Web page password (optional, user <code>admin</code>)</label><input id="n_admin" type="password" placeholder="leave blank for none">
 <h3 style="margin-top:18px">MQTT (Home Assistant)</h3>
-<label>Broker address</label><input id="n_mqtt_host" placeholder="192.168.0.55"><label>Port</label><input id="n_mqtt_port" type="number">
+<label>Broker address</label><input id="n_mqtt_host" placeholder="192.168.0.202"><label>Port</label><input id="n_mqtt_port" type="number">
 <label>Username</label><input id="n_mqtt_user"><label>Password <span id="mqttPassSet"></span></label><input id="n_mqtt_pass" type="password" placeholder="leave blank to keep">
 <label>Base topic</label><input id="n_base_topic"><label>Discovery prefix</label><input id="n_discovery_prefix">
 <div class="row" style="margin-top:12px"><button class="b p" onclick="saveNet()">Save</button></div><p class="note">Changing Wi-Fi restarts the bridge.</p></div></section>
