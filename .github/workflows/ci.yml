@@ -18,6 +18,8 @@ jobs:
           path: ~/.platformio
           key: pio-${{ hashFiles('platformio.ini') }}
       - run: pip install platformio "esptool<5"
+      - name: ESPHome copy of the protocol header is in sync
+        run: cmp include/aok_protocol.h esphome/components/aok_rf/aok_protocol.h
       - name: Protocol tests
         run: g++ -std=c++17 -Wall -Wextra -I include test/test_protocol.cpp -o /tmp/aok_test && /tmp/aok_test | tail -1
       - name: Build firmware

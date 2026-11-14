@@ -2,3 +2,7 @@
 release/*.bin
 __pycache__/
 include/web_ui_gz.h
+
+# ESPHome build output
+esphome/.esphome/
+esphome/secrets.yaml

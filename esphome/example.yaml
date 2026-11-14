@@ -1,0 +1,94 @@
+# A-OK blinds with ESPHome: an ESP32 + CC1101, two blinds and a group.
+# 1. Flash this once without the remote: block, open the logs, and press Up, Down and Stop
+#    on your remote. Each press logs a line with the prefix, remote_id and up/down/stop codes.
+#    (Or copy them from the "remote" section of a backup file from the bridge firmware.)
+# 2. Fill in remote:, set the travel times, and flash again.
+esphome:
+  name: aok-blinds
+  friendly_name: Blinds
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: components
+  # Outside this repo, use it straight from GitHub instead:
+  # - source:
+  #     type: git
+  #     url: https://github.com/olliemaller/aok-blind-bridge
+  #     ref: main
+  #     path: esphome/components
+  #   components: [aok_rf]
+
+logger:
+api:
+ota:
+  - platform: esphome
+wifi:
+  ap: {}
+captive_portal:
+
+aok_rf:
+  id: rf
+  # pins default to the HW-395 / ESP32 DevKit wiring: SCK 18, MISO 19, MOSI 23, CSN 5, GDO0 12, GDO2 27
+  remote:
+    prefix: 0xA1B2C3
+    remote_id: 0x3F
+    up: 0xF42A
+    down: 0xBCF2
+    stop: 0xDC12
+  # Follow the hand remote: when it's used, tell the matching cover so Home Assistant stays in step.
+  on_frame:
+    - if:
+        condition:
+          lambda: 'return my_remote && channels == 0x0001;'
+        then:
+          - lambda: |-
+              auto call = id(lounge_left).make_call();
+              if (action == "up") call.set_command_open();
+              else if (action == "down") call.set_command_close();
+              else if (action == "stop") call.set_command_stop();
+              else return;
+              call.perform();
+
+cover:
+  - platform: time_based
+    id: lounge_left
+    name: Lounge left
+    device_class: shade
+    has_built_in_endstop: true
+    open_duration: 24s
+    close_duration: 22s
+    open_action:
+      - aok_rf.send: { id: rf, channels: 1, action: up }
+    close_action:
+      - aok_rf.send: { id: rf, channels: 1, action: down }
+    stop_action:
+      - aok_rf.send: { id: rf, channels: 1, action: stop }
+
+  - platform: time_based
+    name: Lounge right
+    device_class: shade
+    has_built_in_endstop: true
+    open_duration: 25s
+    close_duration: 23s
+    open_action:
+      - aok_rf.send: { id: rf, channels: 2, action: up }
+    close_action:
+      - aok_rf.send: { id: rf, channels: 2, action: down }
+    stop_action:
+      - aok_rf.send: { id: rf, channels: 2, action: stop }
+
+button:
+  - platform: template
+    name: All blinds up
+    on_press:
+      - aok_rf.send: { id: rf, channels: [1, 2], action: up }
+  - platform: template
+    name: All blinds down
+    on_press:
+      - aok_rf.send: { id: rf, channels: [1, 2], action: down }
