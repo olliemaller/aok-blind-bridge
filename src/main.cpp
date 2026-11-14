@@ -1263,6 +1263,52 @@ void handleScan() {
   web.send(200, "application/json", out);
 }
 
+// Settings backup: everything except passwords and the Wi-Fi network, so it can move to a new board.
+void handleBackup() {
+  if (!authed()) return;
+  JsonDocument d;
+  d["app"] = "aok-blind-bridge"; d["version"] = FW_VERSION; d["saved"] = static_cast<uint32_t>(wallClock());
+  JsonObject n = d["network"].to<JsonObject>();
+  n["hostname"] = net.hostname; n["brand"] = net.brand; n["tz"] = net.tz; n["tz_name"] = net.tzName;
+  n["mqtt_host"] = net.mqttHost; n["mqtt_port"] = net.mqttPort; n["mqtt_user"] = net.mqttUser;
+  n["base_topic"] = net.base; n["discovery_prefix"] = net.discovery;
+  JsonObject p = d["pins"].to<JsonObject>();
+  p["sck"] = pins.sck; p["miso"] = pins.miso; p["mosi"] = pins.mosi; p["cs"] = pins.cs;
+  p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm;
+  remoteToJson(d["remote"].to<JsonObject>());
+  JsonArray b = d["blinds"].to<JsonArray>();
+  for (size_t i = 0; i < blindCount; ++i) blindToJson(i, b.add<JsonObject>());
+  web.sendHeader("Content-Disposition", String("attachment; filename=") + net.hostname + "-backup.json");
+  sendJson(d);
+}
+
+void handleRestore() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  if (String(d["app"] | "") != "aok-blind-bridge") { sendError("that isn't a blind bridge backup file"); return; }
+  String err;
+  if (d["blinds"].is<JsonArrayConst>() && !blindsFromJson(d["blinds"].as<JsonArrayConst>(), err)) { sendError(err); return; }
+  JsonObjectConst n = d["network"];
+  if (!n.isNull()) {
+    net.hostname = n["hostname"] | net.hostname; net.brand = n["brand"] | net.brand;
+    net.tz = n["tz"] | net.tz; net.tzName = n["tz_name"] | net.tzName;
+    net.mqttHost = n["mqtt_host"] | net.mqttHost; net.mqttPort = n["mqtt_port"] | net.mqttPort;
+    net.mqttUser = n["mqtt_user"] | net.mqttUser; net.base = n["base_topic"] | net.base;
+    net.discovery = n["discovery_prefix"] | net.discovery;
+  }
+  JsonObjectConst p = d["pins"];
+  if (!p.isNull()) {
+    pins.sck = p["sck"] | pins.sck; pins.miso = p["miso"] | pins.miso; pins.mosi = p["mosi"] | pins.mosi;
+    pins.cs = p["cs"] | pins.cs; pins.gdo0 = p["gdo0"] | pins.gdo0; pins.gdo2 = p["gdo2"] | pins.gdo2;
+    pins.led = p["led"] | pins.led; pins.mhz = p["mhz"] | pins.mhz; pins.paDbm = p["pa_dbm"] | pins.paDbm;
+  }
+  if (!d["remote"].isNull()) remoteFromJson(d["remote"].as<JsonObjectConst>());
+  saveNet(); savePins(); saveRemote(); saveBlinds(); savePositions();
+  LOGI("Settings restored from a backup (%u blinds), restarting", static_cast<unsigned>(blindCount));
+  scheduleReboot(1500);
+  JsonDocument r; r["ok"] = true; r["rebooting"] = true; sendJson(r);
+}
+
 void handleReboot() { if (!authed()) return; LOGI("Restart requested from the web page"); sendOk(); scheduleReboot(800); }
 
 void handleLog() {
@@ -1312,7 +1358,11 @@ void handleUpdateUpload() {
 }
 
 void handleRoot() {
+  // the page only changes with the firmware, so browsers can reuse their copy
+  const String etag = String("\"") + FW_VERSION + "-" + WEB_UI_GZ_LEN + "\"";
   web.sendHeader("Cache-Control", "no-cache");
+  web.sendHeader("ETag", etag);
+  if (web.header("If-None-Match") == etag) { web.send(304); return; }
   web.sendHeader("Content-Encoding", "gzip");
   web.send_P(200, "text/html", reinterpret_cast<const char*>(WEB_UI_GZ), WEB_UI_GZ_LEN);
 }
@@ -1323,7 +1373,11 @@ void handleNotFound() {
 }
 
 void setupWeb() {
+  static const char* kHeaders[] = {"If-None-Match"};
+  web.collectHeaders(kHeaders, 1);
   web.on("/", HTTP_GET, handleRoot);
+  web.on("/api/backup", HTTP_GET, handleBackup);
+  web.on("/api/restore", HTTP_POST, handleRestore);
   web.on("/api/state", HTTP_GET, handleState);
   web.on("/api/config", HTTP_GET, handleConfigGet);
   web.on("/api/network", HTTP_POST, handleNetworkPost);
@@ -1347,6 +1401,109 @@ void setupWeb() {
   web.onNotFound(handleNotFound);
   web.begin();
 }
+
+// ---------------------------------------------------------------- Improv Wi-Fi (serial)
+// https://www.improv-wifi.com/serial/ — lets the web installer ask for Wi-Fi straight after flashing.
+namespace improv {
+enum : uint8_t { TypeState = 1, TypeError = 2, TypeRpc = 3, TypeRpcResult = 4 };
+enum : uint8_t { StateReady = 2, StateProvisioning = 3, StateProvisioned = 4 };
+enum : uint8_t { ErrNone = 0, ErrInvalid = 1, ErrUnknownCmd = 2, ErrConnect = 3 };
+enum : uint8_t { CmdWifi = 1, CmdState = 2, CmdInfo = 3, CmdScan = 4 };
+uint8_t buf[256];
+size_t len = 0;
+bool provisioning = false;
+uint32_t provisionStartMs = 0;
+
+void send(uint8_t type, const uint8_t* data, size_t n) {
+  uint8_t pkt[268];
+  size_t k = 0;
+  memcpy(pkt, "IMPROV", 6); k = 6;
+  pkt[k++] = 1; pkt[k++] = type; pkt[k++] = static_cast<uint8_t>(n);
+  memcpy(pkt + k, data, n); k += n;
+  uint8_t sum = 0;
+  for (size_t i = 0; i < k; ++i) sum += pkt[i];
+  pkt[k++] = sum; pkt[k++] = '\n';
+  Serial.write(pkt, k);
+}
+void state(uint8_t s) { send(TypeState, &s, 1); }
+void error(uint8_t e) { send(TypeError, &e, 1); }
+void result(uint8_t cmd, std::initializer_list<String> strings) {
+  uint8_t d[250];
+  size_t k = 2;
+  for (const String& s : strings) {
+    const size_t l = min<size_t>(s.length(), sizeof(d) - k - 1);
+    d[k++] = static_cast<uint8_t>(l); memcpy(d + k, s.c_str(), l); k += l;
+  }
+  d[0] = cmd; d[1] = static_cast<uint8_t>(k - 2);
+  send(TypeRpcResult, d, k);
+}
+String url() { return String("http://") + WiFi.localIP().toString(); }
+
+void handle(const uint8_t* d, size_t n) {
+  if (n < 2 || static_cast<size_t>(d[1]) + 2 > n) { error(ErrInvalid); return; }
+  switch (d[0]) {
+    case CmdState:
+      if (WiFi.status() == WL_CONNECTED) { state(StateProvisioned); result(CmdState, {url()}); }
+      else state(StateReady);
+      break;
+    case CmdInfo:
+      result(CmdInfo, {"AOK Blind Bridge", FW_VERSION, "ESP32", net.hostname});
+      break;
+    case CmdScan: {
+      const int count = WiFi.scanNetworks(false, false);
+      for (int i = 0; i < count; ++i)
+        result(CmdScan, {WiFi.SSID(i), String(WiFi.RSSI(i)), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "NO" : "YES"});
+      result(CmdScan, {});
+      WiFi.scanDelete();
+      break;
+    }
+    case CmdWifi: {
+      const uint8_t* p = d + 2;
+      const size_t sl = p[0];
+      if (sl + 2 > d[1]) { error(ErrInvalid); return; }
+      const String ssid(reinterpret_cast<const char*>(p + 1), sl);
+      const size_t pl = p[1 + sl];
+      if (2 + sl + pl > d[1]) { error(ErrInvalid); return; }
+      const String pass(reinterpret_cast<const char*>(p + 2 + sl), pl);
+      net.ssid = ssid; net.pass = pass; saveNet();
+      LOGI("Wi-Fi set over USB (Improv): %s", ssid.c_str());
+      error(ErrNone);
+      state(StateProvisioning);
+      provisioning = true; provisionStartMs = millis();
+      WiFi.mode(apMode ? WIFI_AP_STA : WIFI_STA);
+      WiFi.begin(net.ssid.c_str(), net.pass.c_str());
+      staStartMs = millis();
+      break;
+    }
+    default: error(ErrUnknownCmd);
+  }
+}
+
+void poll() {
+  while (Serial.available()) {
+    const uint8_t b = Serial.read();
+    if (len < 6) {
+      if (b == static_cast<uint8_t>("IMPROV"[len])) buf[len++] = b;
+      else len = b == 'I' ? (buf[0] = b, 1) : 0;
+      continue;
+    }
+    buf[len++] = b;
+    if (len < 9) continue;
+    const size_t total = 9 + buf[8] + 1;
+    if (len < total && len < sizeof(buf)) continue;
+    if (len == total) {
+      uint8_t sum = 0;
+      for (size_t i = 0; i + 1 < total; ++i) sum += buf[i];
+      if (sum == buf[total - 1] && buf[6] == 1 && buf[7] == TypeRpc) handle(buf + 9, buf[8]);
+    }
+    len = 0;
+  }
+  if (provisioning) {
+    if (WiFi.status() == WL_CONNECTED) { state(StateProvisioned); result(CmdWifi, {url()}); provisioning = false; }
+    else if (millis() - provisionStartMs > 20000) { error(ErrConnect); state(StateReady); provisioning = false; }
+  }
+}
+}  // namespace improv
 
 // ---------------------------------------------------------------- Wi-Fi
 void startAp() {
@@ -1447,6 +1604,7 @@ void setup() {
 
 void loop() {
   pollRadio();
+  improv::poll();
   maintainWifi();
   web.handleClient();
   if (otaReady) ArduinoOTA.handle();
