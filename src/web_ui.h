@@ -3,7 +3,7 @@
 
 static const char WEB_UI_HTML[] PROGMEM = R"HTML(<!doctype html>
 <html lang="en-AU"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>A-OK Blind Bridge</title>
+<title>Motolux Blind Bridge</title>
 <style>
 :root{--bg:#0f1115;--card:#181b22;--line:#262a33;--text:#e8eaef;--muted:#9097a3;--acc:#4f8cff;--ok:#3fbf7f;--warn:#e0a83a;--bad:#e05656}
 @media (prefers-color-scheme:light){:root{--bg:#f4f5f7;--card:#fff;--line:#e2e4e9;--text:#16181d;--muted:#5f6672}}
@@ -32,13 +32,13 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:7px 6px;b
 a{color:var(--acc)}td select{min-width:92px}
 #toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--card);border:1px solid var(--line);padding:10px 14px;border-radius:10px;display:none;max-width:90vw}
 </style></head><body>
-<header><h1>A-OK Blind Bridge</h1><button id="cWifi" class="chip" onclick="show('net')">Wi-Fi</button><button id="cMqtt" class="chip" onclick="show('net')">MQTT</button><button id="cRadio" class="chip" onclick="show('radio')">Radio</button><button id="cRemote" class="chip" onclick="show('remote')">Remote</button></header>
+<header><h1>Motolux Blind Bridge</h1><button id="cWifi" class="chip" onclick="show('net')">Wi-Fi</button><button id="cMqtt" class="chip" onclick="show('net')">MQTT</button><button id="cRadio" class="chip" onclick="show('radio')">Radio</button><button id="cRemote" class="chip" onclick="show('remote')">Remote</button></header>
 <nav id="nav"></nav>
 <main>
 <section id="s-blinds"><div id="blindCards" class="grid"></div><p id="noBlinds" class="note" style="display:none">No blinds yet. Learn your remote under <b>Remote</b>, then add blinds under <b>Set up blinds</b>.</p></section>
 
 <section id="s-remote"><div class="card">
-<h3>Learn your A-OK remote</h3><p class="note">The bridge copies your hand remote's identity, so the blinds accept it like a second remote. Nothing is changed on the motors.</p>
+<h3>Learn your Motolux remote</h3><p class="note">The bridge copies your hand remote's identity, so the blinds accept it like a second remote. Nothing is changed on the motors.</p>
 <ol class="steps"><li id="l1">Press <b>Start learning</b>.</li><li id="l2">Hold the remote near the bridge, pick any channel, and press <b>Up</b> once.</li><li id="l3">Press <b>Down</b> once.</li><li id="l4">Press <b>Stop</b> (the middle button) once.</li></ol>
 <div class="row"><button class="b p" onclick="post('/api/remote',{action:'learn'})">Start learning</button><button class="b" onclick="post('/api/remote',{action:'cancel'})">Cancel</button><button class="b d" onclick="if(confirm('Forget the learned remote?'))post('/api/remote',{action:'forget'})">Forget remote</button></div>
 <p id="learnStatus" class="note"></p>
@@ -77,7 +77,7 @@ a{color:var(--acc)}td select{min-width:92px}
 <div class="card" style="margin-top:12px"><h3>Firmware</h3><p class="note" id="fwInfo"></p>
 <input type="file" id="fw" accept=".bin"><div class="row" style="margin-top:10px"><button class="b" onclick="upload()">Upload firmware</button><button class="b" onclick="if(confirm('Restart the bridge?'))post('/api/reboot',{})">Restart</button></div></div></section>
 
-<section id="s-log"><div class="card"><h3>Heard on 433.92 MHz</h3><p class="note">Recent A-OK frames. Ticked = your learned remote.</p><div style="overflow-x:auto"><table id="frames"></table></div></div></section>
+<section id="s-log"><div class="card"><h3>Heard on 433.92 MHz</h3><p class="note">Recent Motolux frames. Ticked = your learned remote.</p><div style="overflow-x:auto"><table id="frames"></table></div></div></section>
 </main><div id="toast"></div>
 <script>
 const tabs=[['blinds','Blinds'],['remote','Remote'],['setup','Set up blinds'],['cal','Calibrate'],['net','Network'],['radio','Radio & firmware'],['log','Activity']];

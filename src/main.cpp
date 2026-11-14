@@ -1,4 +1,4 @@
-// A-OK Blind Bridge — ESP32 + CC1101 firmware for A-OK 433.92 MHz blind motors.
+// Motolux Blind Bridge — ESP32 + CC1101 firmware for Motolux (A-OK protocol) 433.92 MHz blind motors.
 //
 // Based on pgnehm/ESP32-Orvibo-A-OK-HomeAssistant-Blind-Bridge (protocol research, encoder rules,
 // CC1101 async OOK approach). This version adds: on-device learning from the physical remote,
@@ -21,7 +21,7 @@
 #include "aok_protocol.h"
 #include "web_ui.h"
 
-#define FW_VERSION "1.0.1"
+#define FW_VERSION "1.0.2"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
 #ifndef DEFAULT_PIN_SCK
@@ -63,10 +63,10 @@ struct Pins {
 };
 
 struct NetCfg {
-  String ssid, pass, hostname = "aok-blinds", adminPass;
+  String ssid, pass, hostname = "motolux-blinds", adminPass;
   String mqttHost;
   uint16_t mqttPort = 1883;
-  String mqttUser, mqttPass, base = "aok_blinds", discovery = "homeassistant";
+  String mqttUser, mqttPass, base = "motolux_blinds", discovery = "homeassistant";
 };
 
 struct RemoteCfg {
@@ -193,9 +193,9 @@ void saveNet() {
 void loadNet() {
   JsonDocument d;
   if (deserializeJson(d, prefs.getString("net", "{}"))) return;
-  net.ssid = d["ssid"] | ""; net.pass = d["pass"] | ""; net.hostname = d["host"] | "aok-blinds";
+  net.ssid = d["ssid"] | ""; net.pass = d["pass"] | ""; net.hostname = d["host"] | "motolux-blinds";
   net.adminPass = d["admin"] | ""; net.mqttHost = d["mh"] | ""; net.mqttPort = d["mp"] | 1883;
-  net.mqttUser = d["mu"] | ""; net.mqttPass = d["mw"] | ""; net.base = d["base"] | "aok_blinds";
+  net.mqttUser = d["mu"] | ""; net.mqttPass = d["mw"] | ""; net.base = d["base"] | "motolux_blinds";
   net.discovery = d["disc"] | "homeassistant";
 }
 
@@ -551,7 +551,7 @@ String nodeId() { return net.base; }
 void deviceJson(JsonObject o) {
   JsonObject dev = o["device"].to<JsonObject>();
   dev["identifiers"].to<JsonArray>().add(nodeId());
-  dev["name"] = "A-OK Blind Bridge";
+  dev["name"] = "Motolux Blind Bridge";
   dev["manufacturer"] = "DIY";
   dev["model"] = "ESP32 + CC1101";
   dev["sw_version"] = FW_VERSION;
@@ -589,7 +589,7 @@ void publishDiscovery() {
       dev["identifiers"][0] = uid;
       dev["name"] = cfg[i].name;
       dev["via_device"] = nodeId();
-      dev["model"] = String("A-OK motor · channel ") + maskText(cfg[i].mask);
+      dev["model"] = String("Motolux motor · channel ") + maskText(cfg[i].mask);
       publishJson(disc + "/cover/" + uid + "/config", d);
     }
     struct Btn { const char* key; const char* name; const char* payload; const char* icon; };
@@ -874,7 +874,7 @@ void pollRadio() {
 bool authed() {
   if (!net.adminPass.length()) return true;
   if (web.authenticate("admin", net.adminPass.c_str())) return true;
-  web.requestAuthentication(BASIC_AUTH, "A-OK Blind Bridge");
+  web.requestAuthentication(BASIC_AUTH, "Motolux Blind Bridge");
   return false;
 }
 
@@ -1144,7 +1144,7 @@ void setupWeb() {
 // ---------------------------------------------------------------- Wi-Fi
 void startAp() {
   if (apMode) return;
-  const String name = String("AOK-Blinds-") + String(static_cast<uint32_t>(ESP.getEfuseMac() >> 24) & 0xFFFF, HEX);
+  const String name = String("Motolux-Blinds-") + String(static_cast<uint32_t>(ESP.getEfuseMac() >> 24) & 0xFFFF, HEX);
   WiFi.mode(WIFI_AP_STA);  // STA side stays up so the setup page can scan for networks
   WiFi.softAP(name.c_str());
   dns.start(53, "*", WiFi.softAPIP());
@@ -1205,7 +1205,7 @@ void updateLed() {
 void setup() {
   Serial.begin(115200);
   delay(150);
-  Serial.printf("\nA-OK Blind Bridge %s\n", FW_VERSION);
+  Serial.printf("\nMotolux Blind Bridge %s\n", FW_VERSION);
   prefs.begin("aok", false);
   loadNet();
   loadPins();
