@@ -7,9 +7,12 @@ from urllib.parse import urlparse, parse_qs
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T0 = time.time()
 names = ["Lounge left", "Lounge right", "Kitchen", "Study", "Bedroom", "Dining"]
+rooms = ["Lounge", "Lounge", "Kitchen", "Study", "Bedroom", ""]
+REV = [1]
+NET = dict(brand="A-OK", tz="", tz_name="")
 blinds = [dict(id=n.lower().replace(" ", "_"), name=n, channels=str(i + 1), open_ms=24000 + i * 900, close_ms=22000 + i * 700,
-               invert=False, favourite=(40 if i == 0 else -1), device_class="shade") for i, n in enumerate(names)]
-blinds.append(dict(id="lounge", name="Lounge (both)", channels="1,2", open_ms=24000, close_ms=22000, invert=False, favourite=-1, device_class="shade"))
+               invert=False, favourite=(40 if i == 0 else -1), device_class="shade", room=rooms[i]) for i, n in enumerate(names)]
+blinds.append(dict(id="lounge", name="Lounge (both)", channels="1,2", open_ms=24000, close_ms=22000, invert=False, favourite=-1, device_class="shade", room="Lounge"))
 state = {b["id"]: dict(pos=[100, 60, 0, 35, 100, -1, 80][i], motion="stopped", start=0, startpos=0, goal=0) for i, b in enumerate(blinds)}
 remote = dict(prefix="A1B2C3", remote_id="3F", open="F42A", close="BCF2", stop="DC12", listen=True, seen="1,2,3,4,5,6,7")
 cal = dict(active=False)
@@ -48,7 +51,7 @@ def move(b, target):
     log("I", f"Sent {'Up' if target > p else 'Down'} on channel {b['channels']}")
 
 def full_state():
-    out = dict(fw="1.1.0", uptime=int(time.time() - T0) + 7300, heap=181234, reset_reason=1, time=int(time.time()), log_seq=len(logs),
+    out = dict(fw="1.2.0", rev=REV[0], brand=NET["brand"], uptime=int(time.time() - T0) + 7300, heap=181234, reset_reason=1, time=int(time.time()), log_seq=len(logs),
                wifi=dict(connected=True, ssid="HomeWiFi", ip="192.168.0.150", rssi=-58, ap=False, hostname="motolux-blinds"),
                mqtt=dict(configured=True, connected=True, state=0),
                radio=dict(ready=True, overflow=0, mhz=433.92, last_tx_ago_s=12, last_rx_ago_s=4),
@@ -71,10 +74,14 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path); q = parse_qs(u.query)
         if u.path == "/": return self.send(200, open(os.path.join(ROOT, "ui", "index.html"), "rb").read(), "text/html")
-        if u.path == "/api/state": return self.send(200, full_state())
+        if u.path == "/api/state":
+            st = full_state()
+            if "lite" in q: st.pop("frames"); st.pop("cal_history")
+            return self.send(200, st)
+        if u.path == "/api/backup": return self.send(200, dict(app="aok-blind-bridge", version="1.2.0", remote=remote, blinds=blinds))
         if u.path == "/api/config":
             return self.send(200, dict(network=dict(ssid="HomeWiFi", pass_set=True, hostname="motolux-blinds", admin_set=False, mqtt_host="192.168.0.202",
-                mqtt_port=1883, mqtt_user="mqtt", mqtt_pass_set=True, base_topic="motolux_blinds", discovery_prefix="homeassistant"),
+                mqtt_port=1883, mqtt_user="mqtt", mqtt_pass_set=True, base_topic="aok_blinds", discovery_prefix="homeassistant", **NET),
                 pins=dict(sck=18, miso=19, mosi=23, cs=5, gdo0=12, gdo2=27, led=2, mhz=433.92, pa_dbm=10), remote=remote, blinds=blinds))
         if u.path == "/api/log":
             after = int(q.get("after", ["0"])[0])
@@ -84,6 +91,17 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0)); body = json.loads(self.rfile.read(n) or b"{}")
         p = urlparse(self.path).path
+        if p == "/api/network":
+            for k in ("brand", "tz", "tz_name"):
+                if k in body: NET[k] = body[k]
+            log("I", "Network settings saved"); return self.send(200, {"ok": True, "rebooting": False})
+        if p == "/api/command" and body["id"] == "all":
+            for b in blinds:
+                if "," in b["channels"]: continue
+                if body["cmd"] == "OPEN": move(b, 100)
+                elif body["cmd"] == "CLOSE": move(b, 0)
+                else: state[b["id"]].update(pos=cur(b), motion="stopped")
+            log("I", f"All blinds: {body['cmd']} (web)"); return self.send(200, {"ok": True})
         if p == "/api/command":
             b = next(x for x in blinds if x["id"] == body["id"]); c = body["cmd"]
             log("I", f"Web page: {b['name']} → {c}")
@@ -104,7 +122,7 @@ class H(BaseHTTPRequestHandler):
                 ms = int((time.time() - cal["t"]) * 1000); b = next(x for x in blinds if x["id"] == cal["id"])
                 k = "open_ms" if cal["direction"] == "opening" else "close_ms"; prev = b[k]; b[k] = ms
                 cal_hist.append(dict(name=b["name"], direction="open" if k == "open_ms" else "close", ms=ms, previous_ms=prev, when=int(time.time())))
-                cal["active"] = False; return self.send(200, {"ok": True, "measured_ms": ms})
+                cal["active"] = False; REV[0] += 1; return self.send(200, {"ok": True, "measured_ms": ms})
             if a == "cancel": cal["active"] = False
             if a == "clear_history": cal_hist.clear()
             return self.send(200, {"ok": True})

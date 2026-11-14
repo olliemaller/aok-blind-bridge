@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#101214" media="(prefers-color-scheme: dark)">
-<title>Motolux Blinds</title>
+<title>Blinds</title>
 <style>
 :root{
   --bg:#f6f7f9;--panel:#fff;--panel2:#f1f3f6;--line:#e3e6eb;--line2:#d3d8df;
@@ -135,6 +135,11 @@ input[type=range]{flex:1;min-width:0;accent-color:var(--acc);height:28px;margin:
 .empty{text-align:center;padding:40px 16px;color:var(--text2)}
 .empty svg{width:48px;height:48px;color:var(--text3);margin-bottom:8px}
 
+.allbar{display:flex;align-items:center;gap:8px;padding:10px 14px}
+.allbar b{font-weight:600;margin-right:auto}
+.room{font-size:12.5px;font-weight:600;color:var(--text2);text-transform:none;margin:6px 2px -4px;letter-spacing:.01em}
+.room:first-child{margin-top:0}
+.upd{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 /* lists */
 .list{display:grid}
 .li{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line)}
@@ -237,7 +242,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
   <div class="top">
     <div class="brand">
       <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><rect width="30" height="30" rx="8" fill="var(--acc)"/><rect x="8" y="7" width="14" height="2.2" rx="1" fill="#fff"/><rect x="9" y="9" width="12" height="9" fill="#fff" opacity=".85"/><rect x="9" y="18" width="12" height="1.6" rx=".8" fill="#fff"/><rect x="8" y="22" width="14" height="1.4" rx=".7" fill="#fff" opacity=".6"/></svg>
-      <div><b>Motolux Blinds</b><span id="devname">Bridge</span></div>
+      <div><b id="brandName">Blinds</b><span id="devname">Bridge</span></div>
     </div>
     <div class="pills">
       <button class="pill" id="pWifi" onclick="go('settings','set-wifi')"><i class="dot"></i><span class="lbl">Wi-Fi</span></button>
@@ -254,7 +259,8 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
 <section id="s-blinds">
   <div class="stack">
     <div id="blindAlerts" class="stack"></div>
-    <div id="blindList" class="blinds"></div>
+    <div id="allBar"></div>
+    <div id="blindList" class="stack"></div>
   </div>
 </section>
 
@@ -263,7 +269,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
   <div class="cols">
     <div class="stack">
       <div class="card">
-        <div class="hd"><h2>Your Motolux remote</h2><span class="sp" id="remTag"></span></div>
+        <div class="hd"><h2>Your <span class="brandTxt"></span> remote</h2><span class="sp" id="remTag"></span></div>
         <div class="bd">
           <p class="muted small" style="margin-bottom:14px">The bridge copies your hand remote, so the blinds accept it like a second remote. Nothing on the motors changes.</p>
           <ol class="steps" id="learnSteps">
@@ -369,7 +375,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
     <div class="hd"><h2>Heard on 433.92 MHz</h2>
       <span class="sp"><label class="switch small"><input type="checkbox" id="onlyMine" onchange="drawActivity()"><span>Only my remote</span></label></span></div>
     <div class="bd">
-      <p class="muted small" style="margin-bottom:6px">Signals from Motolux remotes nearby, newest first. Neighbours' remotes show as <span class="tag">Other remote</span> and are ignored.</p>
+      <p class="muted small" style="margin-bottom:6px">Signals from A-OK-protocol remotes nearby, newest first. Neighbours' remotes show as <span class="tag">Other remote</span> and are ignored.</p>
       <div class="list" id="actList"></div>
     </div>
   </div>
@@ -382,7 +388,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
       <span class="sp btns">
         <button class="btn sm" id="logPause" onclick="toggleLogPause()">Pause</button>
         <button class="btn sm" onclick="logEl.innerHTML='';logLines=0"><svg class="ic"><use href="#i-x"/></svg>Clear view</button>
-        <a class="btn sm" href="/api/log?format=text" download="motolux-bridge-log.txt"><svg class="ic"><use href="#i-download"/></svg>Download</a>
+        <a class="btn sm" href="/api/log?format=text" download="blind-bridge-log.txt"><svg class="ic"><use href="#i-download"/></svg>Download</a>
       </span></div>
     <div class="bd">
       <p class="muted small" style="margin-bottom:8px">The last 120 events since the bridge started: commands, remote presses, Wi-Fi and Home Assistant connections, calibrations and errors.</p>
@@ -411,7 +417,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
         <div class="bd">
           <p class="small" id="mqttMsg" style="margin-bottom:12px"></p>
           <div class="grid2">
-            <div class="field"><span>Broker address</span><input type="text" id="n_mqtt_host" placeholder="192.168.0.202" spellcheck="false"></div>
+            <div class="field"><span>Broker address</span><input type="text" id="n_mqtt_host" placeholder="homeassistant.local" spellcheck="false"></div>
             <div class="field"><span>Port</span><input type="number" id="n_mqtt_port" placeholder="1883"></div>
             <div class="field"><span>Username</span><input type="text" id="n_mqtt_user" autocomplete="off" spellcheck="false"></div>
             <div class="field"><span>Password <span class="faint" id="mqttPassSet"></span></span><input type="password" id="n_mqtt_pass" placeholder="Leave blank to keep" autocomplete="new-password"></div>
@@ -429,6 +435,8 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
         <div class="hd"><h2>Device</h2></div>
         <div class="bd">
           <div class="grid2">
+            <div class="field"><span>Blind brand</span><input type="text" id="n_brand" maxlength="24" placeholder="A-OK"><small>Shown in the title, the setup Wi-Fi name and Home Assistant.</small></div>
+            <div class="field"><span>Time zone</span><select id="n_tz"></select><small>For log and calibration times.</small></div>
             <div class="field"><span>Device name</span><input type="text" id="n_hostname" spellcheck="false"><small id="hostHint"></small></div>
             <div class="field"><span>Web page password</span><input type="password" id="n_admin" placeholder="None" autocomplete="new-password"><small>User name is <span class="mono">admin</span>. Leave blank for none.</small></div>
           </div>
@@ -452,10 +460,20 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
           </details>
         </div>
       </div>
+      <div class="card" id="set-backup">
+        <div class="hd"><h2>Backup</h2></div>
+        <div class="bd">
+          <p class="muted small" style="margin-bottom:12px">Saves your blinds, remote, travel times, pins and Home Assistant settings to a file. Passwords and Wi-Fi aren't included. Restore it onto a new board to carry everything over.</p>
+          <div class="btns"><a class="btn" href="/api/backup" download><svg class="ic"><use href="#i-download"/></svg>Download backup</a>
+            <label class="btn" style="cursor:pointer">Restore from file<input type="file" accept=".json,application/json" style="display:none" onchange="restore(this.files[0]);this.value=''"></label></div>
+        </div>
+      </div>
       <div class="card" id="set-fw">
         <div class="hd"><h2>Firmware</h2></div>
         <div class="bd">
           <dl class="kv" id="fwKv"></dl>
+          <div class="sep"></div>
+          <div class="upd"><button class="btn" id="updBtn" onclick="checkUpdate()">Check for updates</button><span class="small muted" id="updMsg"></span></div>
           <div class="sep"></div>
           <div class="field"><span>Update</span><input type="file" id="fwFile" accept=".bin" style="font-size:13px"><small>Use the <span class="mono">…-ota.bin</span> file. Blinds, remote and settings are kept.</small></div>
           <div class="btns"><button class="btn pri" id="fwBtn" onclick="upload()">Upload firmware</button><button class="btn" onclick="restart()">Restart bridge</button></div>
@@ -468,6 +486,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
 </section>
 </main>
 
+<datalist id="roomList"></datalist>
 <div class="savebar" id="savebar"><span id="saveMsg">Unsaved changes</span><button class="btn ghost" onclick="discardEdits()">Discard</button><button class="btn pri" onclick="saveBlinds()">Save blinds</button></div>
 <div id="toast" role="status" aria-live="polite"></div>
 
@@ -478,6 +497,8 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const icon=(n,cls='ic')=>`<svg class="${cls}"><use href="#i-${n}"/></svg>`;
 const TABS=[['blinds','Blinds'],['remote','Remote'],['setup','Set up blinds'],['cal','Calibrate'],['activity','Activity'],['logs','Logs'],['settings','Settings']];
 const openEd=new Set();let edKey=0;
+const UPDATE_MANIFEST='https://olliemaller.github.io/aok-blind-bridge/firmware/manifest.json';
+const TZS=[['Australia/Sydney','AEST-10AEDT,M10.1.0,M4.1.0/3'],['Australia/Melbourne','AEST-10AEDT,M10.1.0,M4.1.0/3'],['Australia/Hobart','AEST-10AEDT,M10.1.0,M4.1.0/3'],['Australia/Brisbane','AEST-10'],['Australia/Adelaide','ACST-9:30ACDT,M10.1.0,M4.1.0/3'],['Australia/Darwin','ACST-9:30'],['Australia/Perth','AWST-8'],['Pacific/Auckland','NZST-12NZDT,M9.5.0,M4.1.0/3'],['Asia/Tokyo','JST-9'],['Asia/Singapore','<+08>-8'],['Asia/Hong_Kong','HKT-8'],['Asia/Kolkata','IST-5:30'],['Asia/Dubai','<+04>-4'],['Africa/Johannesburg','SAST-2'],['Europe/London','GMT0BST,M3.5.0/1,M10.5.0'],['Europe/Dublin','IST-1GMT0,M10.5.0,M3.5.0/1'],['Europe/Paris','CET-1CEST,M3.5.0,M10.5.0/3'],['Europe/Berlin','CET-1CEST,M3.5.0,M10.5.0/3'],['Europe/Amsterdam','CET-1CEST,M3.5.0,M10.5.0/3'],['Europe/Athens','EET-2EEST,M3.5.0/3,M10.5.0/4'],['America/New_York','EST5EDT,M3.2.0,M11.1.0'],['America/Toronto','EST5EDT,M3.2.0,M11.1.0'],['America/Chicago','CST6CDT,M3.2.0,M11.1.0'],['America/Denver','MST7MDT,M3.2.0,M11.1.0'],['America/Phoenix','MST7'],['America/Los_Angeles','PST8PDT,M3.2.0,M11.1.0'],['America/Vancouver','PST8PDT,M3.2.0,M11.1.0'],['UTC','UTC0']];
 let S=null,C=null,edit=null,dirty=false,tab='blinds',testSel=1,polling=null,busy=false,lastFetch=0;
 const anim={};          // id -> {p,rate,goal,dir,t}
 let dragging=null;      // blind id whose slider is being dragged
@@ -522,11 +543,18 @@ function go(t,anchor){
 
 /* ---------- polling ---------- */
 function moving(){return S&&(S.blinds.some(b=>b.motion!='stopped')||S.calibration.active||S.remote.learning)}
+let autoTzDone=false;
+let fullRev=-1,heavy={frames:[],cal_history:[]};
 async function refresh(now){
   if(busy)return;busy=true;
   try{
-    const r=await fetch('/api/state',{cache:'no-store'});
-    if(r.ok){S=await r.json();lastFetch=performance.now();anchorAll();render()}
+    // light poll; the full state (frames, calibration log) only when something in it changed
+    let r=await fetch('/api/state?lite=1',{cache:'no-store'});
+    if(r.ok){
+      let j=await r.json();
+      if(j.rev!==fullRev){const f=await fetch('/api/state',{cache:'no-store'});if(f.ok){j=await f.json();fullRev=j.rev;heavy={frames:j.frames||[],cal_history:j.cal_history||[]}}}
+      S=Object.assign(j,heavy);lastFetch=performance.now();anchorAll();render();
+    }
   }catch(e){}
   busy=false;
   clearTimeout(polling);
@@ -574,6 +602,7 @@ function frame(){
 /* ---------- render ---------- */
 function render(){
   if(!S)return;
+  const brand=S.brand||'A-OK';$('brandName').textContent=brand+' Blinds';document.title=brand+' Blinds';document.querySelectorAll('.brandTxt').forEach(e=>e.textContent=brand);
   $('devname').textContent=S.wifi.ap?'Setup mode':(S.wifi.hostname||'')+(S.wifi.connected?' · '+S.wifi.ip:'');
   pill('pWifi',S.wifi.ap?'warn':S.wifi.connected?'ok':'bad',S.wifi.ap?'Setup Wi-Fi':S.wifi.connected?'Wi-Fi':'Wi-Fi offline');
   pill('pMqtt',!S.mqtt.configured?'warn':S.mqtt.connected?'ok':'bad',!S.mqtt.configured?'Home Assistant not set':S.mqtt.connected?'Home Assistant':'Home Assistant offline');
@@ -597,9 +626,18 @@ function drawBlinds(){
   if(!S.remote.complete)al.push(banner('warn','remote','<b>Learn your remote first.</b> The bridge copies it to control the blinds.','Learn remote',"go('remote')"));
   $('blindAlerts').innerHTML=al.join('');
   const list=$('blindList');
+  $('allBar').innerHTML=S.blinds.length>1?`<div class="card allbar"><b>All blinds</b>
+    <button class="btn sm" onclick="cmd('all','OPEN')">${icon('up')}Open all</button>
+    <button class="btn sm" onclick="cmd('all','STOP')">${icon('stop')}Stop</button>
+    <button class="btn sm" onclick="cmd('all','CLOSE')">${icon('down')}Close all</button></div>`:'';
   if(!S.blinds.length){blindSig='';list.innerHTML=`<div class="card empty" style="grid-column:1/-1">${icon('blind','')}<p><b>No blinds yet</b></p><p class="small" style="margin:4px 0 14px">Add a blind for each channel on your remote.</p><button class="btn pri" onclick="go('setup')">Set up blinds</button></div>`;return}
-  const sig=S.blinds.map(b=>[b.id,b.name,b.channels,b.favourite,b.group].join('|')).join(';');
-  if(sig!==blindSig){blindSig=sig;list.innerHTML=S.blinds.map(blindCard).join('')}
+  const sig=S.blinds.map(b=>[b.id,b.name,b.channels,b.favourite,b.group,b.room].join('|')).join(';');
+  if(sig!==blindSig){blindSig=sig;
+    const rooms=[...new Set(S.blinds.map(b=>b.room||''))];
+    const named=rooms.some(r=>r);
+    rooms.sort((a,b)=>!a?1:!b?-1:a.localeCompare(b));
+    list.innerHTML=rooms.map(r=>`${named?`<div class="room">${esc(r||'Other')}</div>`:''}<div class="blinds">${S.blinds.filter(b=>(b.room||'')===r).map(blindCard).join('')}</div>`).join('');
+  }
 }
 function blindCard(b){
   return `<div class="card blind" data-id="${b.id}">
@@ -694,12 +732,14 @@ function drawEditors(){
   const seen=chList(S?S.remote.seen:'');
   $('editors').innerHTML=edit.length?edit.map((b,i)=>`<div class="card ed ${openEd.has(b._k)?'open':''}">
     <div class="edh" onclick="toggleEd('${b._k}')">${icon('blind')}<b>${esc(b.name||'Unnamed blind')}</b>${chList(b.channels).length>1?'<span class="tag">Group</span>':''}<span class="tag">Ch ${esc(b.channels||'–')}</span>
-      <span class="meta">${secs(b.open_ms)} s up · ${secs(b.close_ms)} s down${b.favourite>=0?' · ★ '+b.favourite+'%':''}${b.invert?' · reversed':''}</span><svg class="chev"><use href="#i-down"/></svg></div>
+      ${b.room?`<span class="faint small">${esc(b.room)}</span>`:''}<span class="meta">${secs(b.open_ms)} s up · ${secs(b.close_ms)} s down${b.favourite>=0?' · ★ '+b.favourite+'%':''}${b.invert?' · reversed':''}</span><svg class="chev"><use href="#i-down"/></svg></div>
     <div class="edb"><div class="row1"><input type="text" value="${esc(b.name)}" placeholder="Name, e.g. Lounge left" oninput="edit[${i}].name=this.value;markDirty();this.closest('.ed').querySelector('.edh b').textContent=this.value||'Unnamed blind'">
       <button class="btn ghost dng sm" title="Remove" onclick="edit.splice(${i},1);markDirty();drawEditors()">${icon('x')}Remove</button></div>
     <span class="lab">Remote channel${chList(b.channels).length>1?'s (group)':''}</span>
     <div class="chans">${Array.from({length:16},(_,c)=>`<button class="chan ${chList(b.channels).includes(c+1)?'on':''} ${seen.includes(c+1)?'seen':''}" onclick="toggleCh(${i},${c+1})">${c+1}</button>`).join('')}</div>
     <div class="grid3" style="margin-top:14px">
+      <label class="field"><span>Room</span><input type="text" list="roomList" value="${esc(b.room||'')}" placeholder="e.g. Lounge" oninput="edit[${i}].room=this.value;markDirty()"></label>
+      <label class="field" style="grid-column:span 2"><span>&nbsp;</span><small style="padding-top:8px">Blinds are grouped by room here, and Home Assistant puts them in that area.</small></label>
       <label class="field"><span>Opening time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.open_ms)}" oninput="edit[${i}].open_ms=Math.round(this.value*1000);markDirty()"></label>
       <label class="field"><span>Closing time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.close_ms)}" oninput="edit[${i}].close_ms=Math.round(this.value*1000);markDirty()"></label>
       <label class="field"><span>Favourite position (%)</span><input type="number" min="0" max="100" placeholder="None" value="${b.favourite>=0?b.favourite:''}" oninput="edit[${i}].favourite=this.value===''?-1:Math.max(0,Math.min(100,parseInt(this.value)||0));markDirty()"></label>
@@ -714,6 +754,8 @@ function drawEditors(){
         <button class="round" title="Down" onclick="testRow(${i},'close')">${icon('down')}</button>
       </span>
     </div></div></div>`).join(''):`<div class="card empty">${icon('blind','')}<p><b>No blinds yet</b></p><p class="small" style="margin-top:4px">Add one for each channel on your remote.</p></div>`;
+  const rl=[...new Set(edit.map(b=>b.room).filter(Boolean))];
+  $('roomList').innerHTML=rl.map(r=>`<option value="${esc(r)}">`).join('');
   if(S)drawSetupAlerts();
 }
 function toggleCh(i,c){const l=chList(edit[i].channels).filter(x=>x!=c);if(!chList(edit[i].channels).includes(c))l.push(c);edit[i].channels=l.sort((a,b)=>a-b).join(',');markDirty();drawEditors()}
@@ -727,7 +769,7 @@ function addBlind(ch){
   if(edit.length>=16)return toast('The bridge supports up to 16 blinds',true);
   const c=ch||nextChannel();
   const k='new'+(++edKey);openEd.add(k);
-  edit.push({_k:k,name:'Blind '+c,channels:String(c),open_ms:30000,close_ms:30000,favourite:-1,device_class:'shade',invert:false});
+  edit.push({_k:k,name:'Blind '+c,room:'',channels:String(c),open_ms:30000,close_ms:30000,favourite:-1,device_class:'shade',invert:false});
   markDirty();drawEditors();
 }
 function addMissing(){
@@ -816,12 +858,17 @@ function fillSettings(){
   ['ssid','hostname','mqtt_host','mqtt_port','mqtt_user','base_topic','discovery_prefix'].forEach(k=>{const e=$('n_'+k);if(document.activeElement!==e&&!e.dataset.touched)e.value=n[k]??''});
   $('passSet').textContent=n.pass_set?'(saved)':'';$('mqttPassSet').textContent=n.mqtt_pass_set?'(saved)':'';
   $('n_admin').placeholder=n.admin_set?'Password set: type a new one to change':'None';
+  if(document.activeElement!==$('n_brand')&&!$('n_brand').dataset.touched)$('n_brand').value=n.brand||'';
+  const tzSel=$('n_tz');
+  if(!tzSel.options.length)tzSel.innerHTML=TZS.map(([z])=>`<option value="${z}">${z.replace(/_/g,' ').replace('/',' / ')}</option>`).join('');
+  if(document.activeElement!==tzSel&&!tzSel.dataset.touched){const name=n.tz_name||(TZS.find(t=>t[1]==n.tz)||[])[0]||'UTC';tzSel.value=name}
+  if(!n.tz&&!autoTzDone){autoTzDone=true;const z=Intl.DateTimeFormat().resolvedOptions().timeZone,m=TZS.find(t=>t[0]==z);if(m)fetch('/api/network',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tz:m[1],tz_name:m[0]})}).then(()=>loadConfig())}
   $('hostHint').innerHTML=`Open the page at <span class="mono">http://${esc(n.hostname)}.local</span>`;
   const P=[['sck','SCK',5],['miso','MISO',7],['mosi','MOSI',6],['cs','CSN',4],['gdo0','GDO0 (send)',3],['gdo2','GDO2 (receive)',8]];
   $('wiring').innerHTML='<tr><th>CC1101 pin</th><th>ESP32 GPIO</th></tr><tr><td>VCC (pin 2)</td><td>3V3 <span class="faint small">not 5V</span></td></tr><tr><td>GND (pin 1)</td><td>GND</td></tr>'+P.map(([k,l,n])=>`<tr><td>${l} (pin ${n})</td><td>${C.pins[k]}</td></tr>`).join('');
   const PG=[['sck','SCK'],['miso','MISO'],['mosi','MOSI'],['cs','CSN'],['gdo0','GDO0'],['gdo2','GDO2'],['led','Status LED (-1 none)'],['mhz','Frequency (MHz)'],['pa_dbm','Power (dBm)']];
   if(!$('pinGrid').dataset.filled){$('pinGrid').innerHTML=PG.map(([k,l])=>`<label class="field"><span>${l}</span><input type="number" step="any" id="p_${k}" value="${C.pins[k]}"></label>`).join('');$('pinGrid').dataset.filled=1}
-  document.querySelectorAll('#s-settings input[id^=n_]').forEach(e=>e.oninput=()=>e.dataset.touched=1);
+  document.querySelectorAll('#s-settings input[id^=n_],#s-settings select[id^=n_]').forEach(e=>e.oninput=e.onchange=()=>e.dataset.touched=1);
 }
 function drawStatus(){
   const w=S.wifi,m=S.mqtt,r=S.radio;
@@ -847,15 +894,50 @@ async function saveNet(which){
   const b={},v=k=>$('n_'+k).value.trim();
   if(which=='wifi'){if(!v('ssid'))return toast('Enter the network name',true);b.ssid=v('ssid');if($('n_pass').value)b.pass=$('n_pass').value}
   if(which=='mqtt'){b.mqtt_host=v('mqtt_host');b.mqtt_port=parseInt(v('mqtt_port'))||1883;b.mqtt_user=v('mqtt_user');if($('n_mqtt_pass').value)b.mqtt_pass=$('n_mqtt_pass').value;b.base_topic=v('base_topic');b.discovery_prefix=v('discovery_prefix')}
-  if(which=='device'){b.hostname=v('hostname');if($('n_admin').value)b.admin_pass=$('n_admin').value}
+  if(which=='device'){b.hostname=v('hostname');b.brand=v('brand')||'A-OK';const z=TZS.find(t=>t[0]==$('n_tz').value);if(z){b.tz=z[1];b.tz_name=z[0]}if($('n_admin').value)b.admin_pass=$('n_admin').value}
   const j=await api('/api/network',b);
-  if(j){toast(j.rebooting?'Saved. Restarting…':'Saved');document.querySelectorAll('#s-settings input').forEach(e=>{delete e.dataset.touched;if(e.type=='password')e.value=''});loadConfig()}
+  if(j){toast(j.rebooting?'Saved. Restarting…':'Saved');blindSig='';fullRev=-1;document.querySelectorAll('#s-settings input,#s-settings select').forEach(e=>{delete e.dataset.touched;if(e.type=='password')e.value=''});loadConfig()}
+}
+async function restore(file){
+  if(!file)return;let data;
+  try{data=JSON.parse(await file.text())}catch(e){return toast('That file isn\'t a backup',true)}
+  if(data.app!=='aok-blind-bridge')return toast('That file isn\'t a blind bridge backup',true);
+  if(!confirm(`Restore ${data.blinds?data.blinds.length:0} blinds and the remote from this backup? Current blinds and settings are replaced, then the bridge restarts.`))return;
+  const j=await api('/api/restore',data);if(j)toast('Restored. Restarting…');
+}
+const ver=v=>String(v).replace(/^v/,'').split('.').map(n=>parseInt(n)||0);
+const newer=(a,b)=>{const x=ver(a),y=ver(b);for(let i=0;i<3;i++){if((x[i]||0)!==(y[i]||0))return (x[i]||0)>(y[i]||0)}return false};
+let updInfo=null;
+async function checkUpdate(){
+  const m=$('updMsg'),b=$('updBtn');
+  if(updInfo&&newer(updInfo.version,S.fw))return installUpdate();
+  b.disabled=true;m.textContent='Checking…';
+  try{
+    const r=await fetch(UPDATE_MANIFEST,{cache:'no-store'});const j=await r.json();updInfo=j;
+    if(newer(j.version,S.fw)){m.innerHTML=`Version <b>${esc(j.version)}</b> is available. <a href="${esc(j.notes_url||'#')}" target="_blank" rel="noopener">What's new</a>`;b.textContent='Install '+j.version}
+    else{m.textContent=`You're on the latest version (${S.fw}).`}
+  }catch(e){m.textContent='Couldn\'t reach GitHub. The device you\'re using needs internet access to check.'}
+  b.disabled=false;
+}
+async function installUpdate(){
+  const m=$('updMsg'),b=$('updBtn');
+  if(!confirm(`Install version ${updInfo.version}? Blinds, remote and settings are kept.`))return;
+  b.disabled=true;m.textContent='Downloading…';
+  try{
+    const base=UPDATE_MANIFEST.replace(/[^/]+$/,'');
+    const r=await fetch(base+updInfo.ota,{cache:'no-store'});if(!r.ok)throw 0;
+    const blob=await r.blob();
+    sendFirmware(new File([blob],updInfo.ota),true);
+  }catch(e){m.textContent='Download failed. Try again, or download the .bin from GitHub and upload it below.';b.disabled=false}
 }
 async function savePins(){const b={};['sck','miso','mosi','cs','gdo0','gdo2','led','mhz','pa_dbm'].forEach(k=>b[k]=parseFloat($('p_'+k).value));const j=await api('/api/pins',b);if(j)toast('Saved. Restarting…')}
 function restart(){if(confirm('Restart the bridge? It takes about 10 seconds.'))api('/api/reboot',{}).then(j=>j&&toast('Restarting…'))}
 function upload(){
   const f=$('fwFile').files[0];if(!f)return toast('Choose the .bin file first',true);
   if(/factory/i.test(f.name)&&!confirm('This looks like the factory file, which is for USB flashing. Upload it anyway?'))return;
+  sendFirmware(f);
+}
+function sendFirmware(f){
   const x=new XMLHttpRequest(),fd=new FormData(),bar=$('fwProg');fd.append('firmware',f);
   bar.style.display='block';$('fwBtn').disabled=true;$('fwMsg').textContent='Uploading…';
   x.upload.onprogress=e=>{if(e.lengthComputable)bar.firstChild.style.width=(e.loaded/e.total*100)+'%'};
