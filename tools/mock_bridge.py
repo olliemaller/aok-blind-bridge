@@ -52,7 +52,7 @@ def move(b, target):
 
 def full_state():
     out = dict(fw="1.2.0", rev=REV[0], brand=NET["brand"], uptime=int(time.time() - T0) + 7300, heap=181234, reset_reason=1, time=int(time.time()), log_seq=len(logs),
-               wifi=dict(connected=True, ssid="HomeWiFi", ip="192.168.0.150", rssi=-58, ap=False, hostname="motolux-blinds"),
+               wifi=dict(connected=True, ssid="HomeWiFi", ip="192.168.0.150", rssi=-58, ap=False, hostname="aok-blinds"),
                mqtt=dict(configured=True, connected=True, state=0),
                radio=dict(ready=True, overflow=0, mhz=433.92, last_tx_ago_s=12, last_rx_ago_s=4),
                remote=dict(remote, timings={}, complete=True, learning=False, learn_status="complete"),
@@ -80,7 +80,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, st)
         if u.path == "/api/backup": return self.send(200, dict(app="aok-blind-bridge", version="1.2.0", remote=remote, blinds=blinds))
         if u.path == "/api/config":
-            return self.send(200, dict(network=dict(ssid="HomeWiFi", pass_set=True, hostname="motolux-blinds", admin_set=False, mqtt_host="192.168.0.202",
+            return self.send(200, dict(network=dict(ssid="HomeWiFi", pass_set=True, hostname="aok-blinds", admin_set=False, mqtt_host="192.168.0.202",
                 mqtt_port=1883, mqtt_user="mqtt", mqtt_pass_set=True, base_topic="aok_blinds", discovery_prefix="homeassistant", **NET),
                 pins=dict(sck=18, miso=19, mosi=23, cs=5, gdo0=12, gdo2=27, led=2, mhz=433.92, pa_dbm=10), remote=remote, blinds=blinds))
         if u.path == "/api/log":

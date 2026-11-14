@@ -1,6 +1,8 @@
 #pragma once
 // A-OK / Zemismart 433.92 MHz blind remote protocol ("new PWM" format, 64-bit payload).
-// Encoding rules follow tools/aok_protocol.py from pgnehm/ESP32-Orvibo-A-OK-HomeAssistant-Blind-Bridge.
+// The frame layout and checksum rules were worked out by pgnehm in
+// https://github.com/pgnehm/ESP32-Orvibo-A-OK-HomeAssistant-Blind-Bridge (tools/aok_protocol.py); this is an
+// independent C++ implementation. See docs/protocol.md.
 // Header-only and free of Arduino types so it can be unit-tested on the host (see test/).
 
 #include <stddef.h>
