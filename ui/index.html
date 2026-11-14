@@ -139,6 +139,9 @@ input[type=range]{flex:1;min-width:0;accent-color:var(--acc);height:28px;margin:
 .allbar b{font-weight:600;margin-right:auto}
 .room{font-size:12.5px;font-weight:600;color:var(--text2);text-transform:none;margin:6px 2px -4px;letter-spacing:.01em}
 .room:first-child{margin-top:0}
+.broker{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--line2);border-radius:var(--r-sm);background:var(--panel);cursor:pointer;text-align:left;width:100%}
+.broker:hover{border-color:var(--acc)}
+.broker .grow{flex:1;min-width:0}
 .upd{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 /* lists */
 .list{display:grid}
@@ -416,6 +419,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
         <div class="hd"><h2>Home Assistant (MQTT)</h2><span class="sp" id="mqttTag"></span></div>
         <div class="bd">
           <p class="small" id="mqttMsg" style="margin-bottom:12px"></p>
+          <div id="brokerList" class="stack" style="gap:6px;margin-bottom:12px"></div>
           <div class="grid2">
             <div class="field"><span>Broker address</span><input type="text" id="n_mqtt_host" placeholder="homeassistant.local" spellcheck="false"></div>
             <div class="field"><span>Port</span><input type="number" id="n_mqtt_port" placeholder="1883"></div>
@@ -428,7 +432,10 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
               <div class="field"><span>Discovery prefix</span><input type="text" id="n_discovery_prefix" spellcheck="false"></div>
             </div>
           </details>
-          <div class="btns" style="margin-top:8px"><button class="btn pri" onclick="saveNet('mqtt')">Save</button></div>
+          <div class="btns" style="margin-top:8px"><button class="btn pri" onclick="saveNet('mqtt')">Save</button>
+            <button class="btn" id="findBtn" onclick="findBroker()">Find broker</button>
+            <button class="btn" id="testBtn" onclick="testMqtt()">Test connection</button></div>
+          <p class="small" id="mqttTest" style="margin-top:10px;min-height:20px"></p>
         </div>
       </div>
       <div class="card" id="set-device">
@@ -536,6 +543,7 @@ function go(t,anchor){
   if(t=='setup'||t=='settings'||t=='cal')loadConfig();
   if(t=='logs')pollLog(true);
   if(t=='settings'&&S&&S.wifi.ap&&!$('scanSel').dataset.done){$('scanSel').dataset.done=1;scan()}
+  if(t=='settings'&&S&&S.wifi.connected&&!S.mqtt.configured&&!brokerSearched)findBroker(true);
   if(anchor)setTimeout(()=>$(anchor).scrollIntoView({behavior:'smooth',block:'start'}),60);
   else window.scrollTo(0,0);
   if(S)render();
@@ -929,6 +937,28 @@ async function installUpdate(){
     const blob=await r.blob();
     sendFirmware(new File([blob],updInfo.ota),true);
   }catch(e){m.textContent='Download failed. Try again, or download the .bin from GitHub and upload it below.';b.disabled=false}
+}
+let brokerSearched=false;
+async function findBroker(auto){
+  const b=$('findBtn'),list=$('brokerList');brokerSearched=true;
+  b.disabled=true;b.textContent='Searching…';
+  try{
+    const r=await fetch('/api/mqtt/discover',{cache:'no-store'});const j=await r.json();
+    if(!r.ok||j.ok===false){if(!auto)toast(cap(j.error||'Search failed'),true)}
+    else if(!j.brokers.length){if(!auto)list.innerHTML=banner('warn','info','No broker found on this network. Enter its address by hand. On Home Assistant, install the <b>Mosquitto broker</b> add-on first.')}
+    else list.innerHTML=`<div class="small muted">${auto?'Found on your network. Click to use it:':'Click one to use it:'}</div>`+j.brokers.map(x=>`<button class="broker" onclick="useBroker('${esc(x.host)}',${x.port})">${icon('check')}<span class="grow"><b>${esc(x.host)}</b> <span class="faint small">${esc(x.ip)}:${x.port}</span></span><span class="tag">${esc(x.what)}</span></button>`).join('');
+  }catch(e){if(!auto)toast('Search failed',true)}
+  b.disabled=false;b.textContent='Find broker';
+}
+function useBroker(host,port){$('n_mqtt_host').value=host;$('n_mqtt_port').value=port;['n_mqtt_host','n_mqtt_port'].forEach(k=>$(k).dataset.touched=1);$('brokerList').innerHTML='';$('mqttTest').innerHTML='<span class="muted">Now enter the MQTT username and password, then press Test connection.</span>';$('n_mqtt_user').focus()}
+async function testMqtt(){
+  const b=$('testBtn'),out=$('mqttTest');b.disabled=true;b.textContent='Testing…';out.textContent='';
+  const body={host:$('n_mqtt_host').value.trim(),port:parseInt($('n_mqtt_port').value)||1883,user:$('n_mqtt_user').value.trim()};
+  if($('n_mqtt_pass').value)body.pass=$('n_mqtt_pass').value;
+  try{const r=await fetch('/api/mqtt/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();
+    out.innerHTML=j.ok===false?`<span style="color:var(--bad)">${esc(cap(j.error))}</span>`:`<span style="color:var(${j.connected?'--ok':'--bad'})">${esc(j.message)}</span>${j.connected?' Press Save to use them.':''}`}
+  catch(e){out.innerHTML='<span style="color:var(--bad)">The bridge didn\'t answer.</span>'}
+  b.disabled=false;b.textContent='Test connection';
 }
 async function savePins(){const b={};['sck','miso','mosi','cs','gdo0','gdo2','led','mhz','pa_dbm'].forEach(k=>b[k]=parseFloat($('p_'+k).value));const j=await api('/api/pins',b);if(j)toast('Saved. Restarting…')}
 function restart(){if(confirm('Restart the bridge? It takes about 10 seconds.'))api('/api/reboot',{}).then(j=>j&&toast('Restarting…'))}

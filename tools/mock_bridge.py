@@ -51,7 +51,7 @@ def move(b, target):
     log("I", f"Sent {'Up' if target > p else 'Down'} on channel {b['channels']}")
 
 def full_state():
-    out = dict(fw="1.2.0", rev=REV[0], brand=NET["brand"], uptime=int(time.time() - T0) + 7300, heap=181234, reset_reason=1, time=int(time.time()), log_seq=len(logs),
+    out = dict(fw="1.3.0", rev=REV[0], brand=NET["brand"], uptime=int(time.time() - T0) + 7300, heap=181234, reset_reason=1, time=int(time.time()), log_seq=len(logs),
                wifi=dict(connected=True, ssid="HomeWiFi", ip="192.168.0.150", rssi=-58, ap=False, hostname="aok-blinds"),
                mqtt=dict(configured=True, connected=True, state=0),
                radio=dict(ready=True, overflow=0, mhz=433.92, last_tx_ago_s=12, last_rx_ago_s=4),
@@ -86,11 +86,16 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/log":
             after = int(q.get("after", ["0"])[0])
             return self.send(200, dict(seq=len(logs), lines=[l for l in logs if l["seq"] > after]))
+        if u.path == "/api/mqtt/discover":
+            return self.send(200, dict(brokers=[dict(host="homeassistant.local", ip="192.168.0.202", port=1883, what="Home Assistant")]))
         if u.path == "/api/scan": return self.send(200, dict(scanning=False, networks=[dict(ssid="HomeWiFi", rssi=-55, secure=True), dict(ssid="Telstra1234", rssi=-77, secure=True)]))
         self.send(404, {"ok": False})
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0)); body = json.loads(self.rfile.read(n) or b"{}")
         p = urlparse(self.path).path
+        if p == "/api/mqtt/test":
+            ok = body.get("user") == "mqtt"
+            return self.send(200, dict(ok=True, connected=ok, state=0 if ok else 5, message="Connected. These settings work." if ok else "The broker rejected the username or password."))
         if p == "/api/network":
             for k in ("brand", "tz", "tz_name"):
                 if k in body: NET[k] = body[k]

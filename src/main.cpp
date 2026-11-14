@@ -24,7 +24,7 @@
 #include "aok_protocol.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.2.0"
+#define FW_VERSION "1.3.0"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -1233,6 +1233,68 @@ void handleCalibratePost() {
   } else sendError("unknown action");
 }
 
+// ---------------------------------------------------------------- MQTT broker discovery and test
+bool portOpen(const IPAddress& ip, uint16_t port) {
+  WiFiClient c;
+  const bool ok = c.connect(ip, port, 700);
+  c.stop();
+  return ok;
+}
+
+// Looks for MQTT brokers on the network: services advertised as _mqtt._tcp, and Home Assistant
+// (_home-assistant._tcp or homeassistant.local) with something listening on 1883.
+void handleMqttDiscover() {
+  if (!authed()) return;
+  if (WiFi.status() != WL_CONNECTED) { sendError("join your Wi-Fi first, then search for the broker"); return; }
+  if (!mdnsReady && MDNS.begin(net.hostname.c_str())) { MDNS.addService("http", "tcp", 80); mdnsReady = true; }
+  JsonDocument d;
+  JsonArray a = d["brokers"].to<JsonArray>();
+  auto add = [&](const String& host, const IPAddress& ip, uint16_t port, const char* what) {
+    if (ip == IPAddress(0, 0, 0, 0)) return;
+    for (JsonObject o : a) if (o["ip"] == ip.toString() && o["port"] == port) return;
+    if (!portOpen(ip, port)) return;
+    JsonObject o = a.add<JsonObject>();
+    o["host"] = host; o["ip"] = ip.toString(); o["port"] = port; o["what"] = what;
+  };
+  int n = MDNS.queryService("mqtt", "tcp");
+  for (int i = 0; i < n; ++i) add(MDNS.hostname(i) + ".local", MDNS.IP(i), MDNS.port(i), "MQTT broker");
+  n = MDNS.queryService("home-assistant", "tcp");
+  for (int i = 0; i < n; ++i) add(MDNS.hostname(i) + ".local", MDNS.IP(i), 1883, "Home Assistant");
+  if (a.size() == 0) add("homeassistant.local", MDNS.queryHost("homeassistant", 1500), 1883, "Home Assistant");
+  LOGI("Broker search found %u", static_cast<unsigned>(a.size()));
+  sendJson(d);
+}
+
+// Tries a login with the settings on the page (saved password used if the box is blank).
+void handleMqttTest() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  if (WiFi.status() != WL_CONNECTED) { sendError("the bridge isn't on Wi-Fi yet"); return; }
+  const String host = d["host"] | net.mqttHost;
+  const uint16_t port = d["port"] | net.mqttPort;
+  const String user = d["user"] | net.mqttUser;
+  String pass = d["pass"] | "";
+  if (!pass.length() && user == net.mqttUser) pass = net.mqttPass;
+  if (!host.length()) { sendError("enter the broker address"); return; }
+  WiFiClient wc;
+  PubSubClient test(wc);
+  test.setServer(host.c_str(), port);
+  test.setSocketTimeout(4);
+  const String id = net.base + "_test_" + String(static_cast<uint32_t>(esp_random()), HEX);
+  const bool ok = user.length() ? test.connect(id.c_str(), user.c_str(), pass.c_str()) : test.connect(id.c_str());
+  const int st = test.state();
+  test.disconnect();
+  JsonDocument r;
+  r["ok"] = true; r["connected"] = ok; r["state"] = st;
+  r["message"] = ok ? "Connected. These settings work."
+    : st == 5 || st == 4 ? "The broker rejected the username or password."
+    : st == -2 ? "Can't reach the broker: check the address and port."
+    : st == -4 ? "The broker didn't answer in time."
+    : "Couldn't connect.";
+  LOGI("MQTT test %s:%u as %s: %s", host.c_str(), port, user.length() ? user.c_str() : "(no user)", ok ? "ok" : "failed");
+  sendJson(r);
+}
+
 // Wi-Fi scan for the setup page: first call starts an async scan, later calls return results
 void handleScan() {
   if (!authed()) return;
@@ -1389,6 +1451,8 @@ void setupWeb() {
   web.on("/api/calibrate", HTTP_POST, handleCalibratePost);
   web.on("/api/reboot", HTTP_POST, handleReboot);
   web.on("/api/scan", HTTP_GET, handleScan);
+  web.on("/api/mqtt/discover", HTTP_GET, handleMqttDiscover);
+  web.on("/api/mqtt/test", HTTP_POST, handleMqttTest);
   web.on("/api/log", HTTP_GET, handleLog);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   // Phones and Windows probe these when they join the setup Wi-Fi; answering them

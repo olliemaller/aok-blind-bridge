@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.0] - 2026-11-14
+
+### Added
+- **Find broker** in *Settings → Home Assistant*: the bridge looks for MQTT brokers on your network (`_mqtt._tcp` services, and Home Assistant itself via `_home-assistant._tcp` or `homeassistant.local`), then checks that port 1883 answers. Click a result to fill in the address. It runs on its own when MQTT isn't set up yet.
+- **Test connection**: tries the address, username and password on the page before you save. It says plainly whether the broker can't be reached or rejected the login.
+
 ## [1.2.0] - 2026-11-14
 
 First public release.
