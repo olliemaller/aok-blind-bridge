@@ -14,7 +14,7 @@ blinds = [dict(id=n.lower().replace(" ", "_"), name=n, channels=str(i + 1), open
                invert=False, favourite=(40 if i == 0 else -1), device_class="shade", room=rooms[i]) for i, n in enumerate(names)]
 blinds.append(dict(id="lounge", name="Lounge (both)", channels="1,2", open_ms=24000, close_ms=22000, invert=False, favourite=-1, device_class="shade", room="Lounge"))
 state = {b["id"]: dict(pos=[100, 60, 0, 35, 100, -1, 80][i], motion="stopped", start=0, startpos=0, goal=0) for i, b in enumerate(blinds)}
-remote = dict(prefix="A1B2C3", remote_id="3F", open="F42A", close="BCF2", stop="DC12", listen=True, seen="1,2,3,4,5,6,7")
+remote = dict(prefix="A1B2C3", remote_id="3F", open="F42A", close="BCF2", stop="DC12", listen=True, seen="1,2,3,4,5,6,7", prog="AC40", own_id="99", own_channels="3", repeat=False, extra=[])
 cal = dict(active=False)
 AUTO = dict(latitude=-37.81, longitude=144.96,
             scenes=[dict(id="movie", name="Movie", blinds=[dict(id="lounge_left", position=0), dict(id="lounge_right", position=0)])],
@@ -144,6 +144,9 @@ class H(BaseHTTPRequestHandler):
             AUTO.update(body)
             for i, sc in enumerate(AUTO["scenes"]): sc.setdefault("id", sc["name"].lower().replace(" ", "_") or f"scene{i}")
             REV[0] += 1; return self.send(200, {"ok": True})
+        if p == "/api/freqscan":
+            time.sleep(1); return self.send(200, dict(best_mhz=433.95, best_rssi=-52, current_mhz=433.92, points=[]))
+        if p == "/api/pair": return self.send(200, {"ok": True})
         if p == "/api/lock":
             (locks.add if body.get("locked") else locks.discard)(body["id"]); return self.send(200, {"ok": True})
         if p == "/api/blinds":

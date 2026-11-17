@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.6.0] - 2026-11-17
+
+### Added
+- **Pair motors to the bridge's own ID (experimental):** the bridge learns your remote's P button when you press it, then *Pair automatically* sends P, P and Up from its own remote ID on a channel. That motor then keeps working from Home Assistant even if the hand remote is lost or replaced. Without the P button learned, press P twice on the hand remote and use *Pair now*. Not yet confirmed on every A-OK motor: if the motor doesn't jog at the end, nothing has changed.
+- **Repeater:** *Repeat the hand remote* sends each press again from the bridge, for a motor at the edge of the remote's range.
+- **Frequency scan:** hold a remote button and press *Scan*. The bridge measures 433.42–434.42 MHz and offers to tune to where your remote is strongest.
+- **Tilt** for venetian blinds: set a *Tilt time* and Home Assistant gets a tilt slider (`<base>/<blind>/tilt/set`, or `TILT:<0-100>`).
+- **Live updates:** the page gets the state pushed over a WebSocket (port 81) several times a second while blinds move, instead of polling. Polling stays as the fallback.
+- **Ethernet build** for the WT32-ETH01 (`…-eth-factory.bin` / `…-eth-ota.bin`). *Check for updates* picks the right build.
+
 ## [1.5.0] - 2026-11-17
 
 ### Added

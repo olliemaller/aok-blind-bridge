@@ -14,4 +14,11 @@ python3 -m esptool --chip esp32 merge_bin -o "$out/aok-blind-bridge-$ver-factory
   --flash_mode dio --flash_size 4MB \
   0x1000 "$b/bootloader.bin" 0x8000 "$b/partitions.bin" 0xe000 "$boot_app0" 0x10000 "$b/firmware.bin"
 cp "$b/firmware.bin" "$out/aok-blind-bridge-$ver-ota.bin"
+# WT32-ETH01 (Ethernet) build
+(cd "$proj" && pio run -e wt32eth01)
+e="$proj/.pio/build/wt32eth01"
+python3 -m esptool --chip esp32 merge_bin -o "$out/aok-blind-bridge-$ver-eth-factory.bin" \
+  --flash_mode dio --flash_size 4MB \
+  0x1000 "$e/bootloader.bin" 0x8000 "$e/partitions.bin" 0xe000 "$boot_app0" 0x10000 "$e/firmware.bin"
+cp "$e/firmware.bin" "$out/aok-blind-bridge-$ver-eth-ota.bin"
 echo "$ver"

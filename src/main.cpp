@@ -18,6 +18,10 @@
 #include <Update.h>
 #include <math.h>
 #include "aok_sun.h"
+#include <WebSocketsServer.h>
+#ifdef USE_ETH
+#include <ETH.h>
+#endif
 #include <WebServer.h>
 #include <WiFi.h>
 #include <time.h>
@@ -26,7 +30,7 @@
 #include "aok_protocol.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.5.0"
+#define FW_VERSION "1.6.0"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -91,6 +95,15 @@ struct RemoteCfg {
   uint32_t extraPrefix[3] = {0, 0, 0};
   uint8_t extraId[3] = {0, 0, 0};
   uint8_t extraCount = 0;
+  // The programming (P) button, learned when it's pressed on the hand remote,
+  // lets the bridge put a motor into pairing mode itself.
+  bool haveProg = false;
+  uint16_t progBase = 0;
+  // The bridge's own remote ID (same prefix and codes, different ID). Channels in
+  // ownMask have their motors paired to it, so they no longer need the hand remote.
+  uint8_t ownId = 0;
+  uint16_t ownMask = 0;
+  bool repeat = false;  // re-send hand-remote presses, for motors the remote barely reaches
 };
 
 struct BlindCfg {
@@ -98,6 +111,7 @@ struct BlindCfg {
   uint16_t mask = 1;
   uint32_t openMs = 30000, closeMs = 30000;
   uint16_t startMs = 0;  // motor start-up lag: time between the radio frame and the blind actually moving
+  uint16_t tiltMs = 0;   // venetian blinds: time to turn the slats from closed to open (0 = no tilt)
   bool invert = false;
   String presetName[4];             // named positions ("Half", "Privacy"...)
   int presetPos[4] = {-1, -1, -1, -1};
@@ -112,6 +126,7 @@ struct BlindState {
   uint32_t startMs = 0, durMs = 0;
   bool autoStop = false;
   int after = -1;              // after an endpoint run, go on to this position (reference run)
+  int tilt = -1;               // slat angle estimate 0 (closed) .. 100 (open), -1 unknown
   bool locked = false;         // Home Assistant, scenes, schedules and the page leave it alone (Stop still works)
   bool interlock = false;      // window/door open (from Home Assistant): it won't close
   bool windLocked = false;     // an awning retracted for wind: locked until the wind drops
@@ -174,6 +189,14 @@ RTC_NOINIT_ATTR uint32_t crashCount;
 int16_t lastRssi = 0;                // signal strength of the last frame from our remotes
 bool pressActive = false;            // a hand-remote button is being held
 uint32_t pressStartMs = 0;
+uint64_t repeatPayload = 0;          // last hand-remote frame, re-sent when the repeater is on
+// Pairing a motor to the bridge's own ID: P, P, then Up from the new ID.
+int pairChannel = 0;                 // 1-16 while a pairing runs
+uint8_t pairStage = 0;
+uint32_t pairAtMs = 0;
+String pairStatus = "idle";
+WebSocketsServer ws(81);
+uint32_t lastWsPushMs = 0, lastWsRev = 0;
 aok::Action pressAction = aok::Action::Unknown;
 int lastScheduleMinute = -1;
 uint32_t learnPrefix = 0;
@@ -216,6 +239,21 @@ volatile int rxPin = -1;
 aok::Decoder decoder;
 
 // ---------------------------------------------------------------- helpers
+#ifdef USE_ETH
+bool ethUp = false;  // WT32-ETH01 and similar: wired network, Wi-Fi optional
+#endif
+bool netUp() {
+#ifdef USE_ETH
+  if (ethUp) return true;
+#endif
+  return WiFi.status() == WL_CONNECTED;
+}
+IPAddress netIp() {
+#ifdef USE_ETH
+  if (ethUp) return ETH.localIP();
+#endif
+  return WiFi.localIP();
+}
 bool anyMoving();
 void sendError(const String& msg, int code);
 bool runScene(const String& key, const String& source, String& err);
@@ -340,6 +378,10 @@ void remoteToJson(JsonObject o) {
   o["stop"] = remote.have[2] ? hex(remote.base[2], 4) : "";
   o["listen"] = remote.listen;
   o["seen"] = maskText(remote.seen);
+  o["prog"] = remote.haveProg ? hex(remote.progBase, 4) : "";
+  o["own_id"] = remote.ownId ? hex(remote.ownId, 2) : "";
+  o["own_channels"] = maskText(remote.ownMask);
+  o["repeat"] = remote.repeat;
   JsonArray ex = o["extra"].to<JsonArray>();
   for (uint8_t k = 0; k < remote.extraCount; ++k) {
     JsonObject x = ex.add<JsonObject>();
@@ -363,6 +405,14 @@ void remoteFromJson(JsonObjectConst o) {
   }
   if (o["listen"].is<bool>()) remote.listen = o["listen"];
   if (o["seen"].is<const char*>()) remote.seen = parseChannels(o["seen"].as<String>());
+  if (o["prog"].is<const char*>()) {
+    const String v = o["prog"].as<String>();
+    remote.haveProg = v.length() > 0;
+    remote.progBase = remote.haveProg ? parseHex(v) : 0;
+  }
+  if (o["own_id"].is<const char*>()) remote.ownId = parseHex(o["own_id"].as<String>()) & 0xFF;
+  if (o["own_channels"].is<const char*>()) remote.ownMask = parseChannels(o["own_channels"].as<String>());
+  if (o["repeat"].is<bool>()) remote.repeat = o["repeat"];
   if (o["extra"].is<JsonArrayConst>()) {
     remote.extraCount = 0;
     for (JsonObjectConst x : o["extra"].as<JsonArrayConst>()) {
@@ -398,6 +448,7 @@ void blindToJson(size_t i, JsonObject o) {
   o["id"] = cfg[i].id; o["name"] = cfg[i].name; o["channels"] = maskText(cfg[i].mask);
   o["open_ms"] = cfg[i].openMs; o["close_ms"] = cfg[i].closeMs; o["invert"] = cfg[i].invert;
   o["start_ms"] = cfg[i].startMs;
+  o["tilt_ms"] = cfg[i].tiltMs;
   JsonArray pr = o["presets"].to<JsonArray>();
   for (int k = 0; k < 4; ++k) {
     if (cfg[i].presetPos[k] < 0) continue;
@@ -436,6 +487,7 @@ bool blindsFromJson(JsonArrayConst arr, String& err) {
     b.closeMs = constrain(static_cast<uint32_t>(o["close_ms"] | 30000), 1000u, 300000u);
     b.invert = o["invert"] | false;
     b.startMs = constrain(static_cast<int>(o["start_ms"] | 0), 0, 3000);
+    b.tiltMs = constrain(static_cast<int>(o["tilt_ms"] | 0), 0, 5000);
     int k = 0;
     for (JsonObjectConst x : o["presets"].as<JsonArrayConst>()) {
       if (k >= 4) break;
@@ -606,9 +658,17 @@ bool sendAction(uint16_t mask, aok::Action action, String& err) {
   const int a = static_cast<int>(action);
   if (a > 2) { err = "unknown action"; return false; }
   if (!remote.have[a]) { err = String("remote not learned yet: ") + aok::actionName(action); return false; }
-  const uint64_t payload = aok::makePayload(remote.prefix, remote.remoteId, mask, remote.base[a]);
-  LOGI("Sent %s on channel %s", action == aok::Action::Open ? "Up" : action == aok::Action::Close ? "Down" : "Stop", maskText(mask).c_str());
-  return transmitPayload(payload, err);
+  const char* name = action == aok::Action::Open ? "Up" : action == aok::Action::Close ? "Down" : "Stop";
+  const uint16_t own = remote.ownId ? (mask & remote.ownMask) : 0, copied = mask & ~own;
+  if (copied) {
+    LOGI("Sent %s on channel %s", name, maskText(copied).c_str());
+    if (!transmitPayload(aok::makePayload(remote.prefix, remote.remoteId, copied, remote.base[a]), err)) return false;
+  }
+  if (own) {
+    LOGI("Sent %s on channel %s (bridge's own ID)", name, maskText(own).c_str());
+    if (!transmitPayload(aok::makePayload(remote.prefix, remote.ownId, own, remote.base[a]), err)) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------- position model
@@ -768,7 +828,7 @@ void deviceJson(JsonObject o) {
   dev["manufacturer"] = "aok-blind-bridge";
   dev["model"] = "ESP32 + CC1101";
   dev["sw_version"] = FW_VERSION;
-  if (WiFi.status() == WL_CONNECTED) dev["configuration_url"] = String("http://") + WiFi.localIP().toString();
+  if (netUp()) dev["configuration_url"] = String("http://") + netIp().toString();
   o["availability_topic"] = topic("status");
   JsonObject origin = o["origin"].to<JsonObject>();
   origin["name"] = "aok-blind-bridge"; origin["sw_version"] = FW_VERSION; origin["support_url"] = PROJECT_URL;
@@ -802,6 +862,11 @@ void publishDiscovery() {
       av.add<JsonObject>()["topic"] = topic("status");
       av.add<JsonObject>()["topic"] = blindTopic(i, "available");
       d["availability_mode"] = "all";
+      if (cfg[i].tiltMs) {
+        d["tilt_command_topic"] = blindTopic(i, "tilt/set");
+        d["tilt_status_topic"] = blindTopic(i, "tilt");
+        d["tilt_min"] = 0; d["tilt_max"] = 100;
+      }
       deviceJson(d.as<JsonObject>());
       // each blind is its own device so it can sit in its own area
       JsonObject dev = d["device"];
@@ -958,6 +1023,7 @@ void publishBlind(size_t i) {
   JsonArray pr = d["presets"].to<JsonArray>();
   for (int k = 0; k < 4; ++k) if (cfg[i].presetPos[k] >= 0) pr.add(cfg[i].presetName[k] + " " + String(cfg[i].presetPos[k]) + "%");
   mqtt.publish(blindTopic(i, "lock").c_str(), st[i].locked ? "ON" : "OFF", true);
+  if (cfg[i].tiltMs && st[i].tilt >= 0) mqtt.publish(blindTopic(i, "tilt").c_str(), String(st[i].tilt).c_str(), true);
   mqtt.publish(blindTopic(i, "available").c_str(), (radioReady && remoteComplete()) ? "online" : "offline", true);
   publishJson(blindTopic(i, "attributes"), d);
   st[i].lastPublishMs = millis();
@@ -968,7 +1034,7 @@ void publishDiagnostics() {
   if (!mqtt.connected()) return;
   mqtt.publish(topic("diag/rssi").c_str(), String(WiFi.RSSI()).c_str(), true);
   mqtt.publish(topic("diag/uptime").c_str(), String(millis() / 1000).c_str(), true);
-  mqtt.publish(topic("diag/ip").c_str(), WiFi.localIP().toString().c_str(), true);
+  mqtt.publish(topic("diag/ip").c_str(), netIp().toString().c_str(), true);
   mqtt.publish(topic("diag/radio").c_str(), radioReady ? "ON" : "OFF", true);
   mqtt.publish(topic("diag/last_remote").c_str(), lastEventText.c_str(), true);
   if (lastRssi) mqtt.publish(topic("diag/radio_rssi").c_str(), String(lastRssi).c_str(), true);
@@ -1012,6 +1078,7 @@ void onMqtt(char* t, byte* payload, unsigned int len) {
   if (tp == topic("channels/set")) { String err; if (!channelCommand(msg, "home_assistant", err)) LOGW("Channels %s: %s", msg.c_str(), err.c_str()); return; }
   if (tp == topic("wind")) { setWind(msg.equalsIgnoreCase("ON") || msg == "1" || msg.equalsIgnoreCase("true")); return; }
   for (size_t i = 0; i < blindCount; ++i) {
+    if (tp == blindTopic(i, "tilt/set")) { String err; if (!handleBlindCommand(i, String("TILT:") + msg, "home_assistant", err)) LOGW("%s tilt: %s", cfg[i].name.c_str(), err.c_str()); return; }
     if (tp == blindTopic(i, "lock/set")) { setLock(i, msg.equalsIgnoreCase("ON") || msg.equalsIgnoreCase("LOCK")); return; }
     if (tp == blindTopic(i, "interlock")) {
       const bool open = msg.equalsIgnoreCase("ON") || msg.equalsIgnoreCase("open") || msg == "1";
@@ -1070,6 +1137,7 @@ void ensureMqtt() {
     mqtt.subscribe(blindTopic(i, "set").c_str());
     mqtt.subscribe(blindTopic(i, "set_position").c_str());
     mqtt.subscribe(blindTopic(i, "lock/set").c_str());
+    if (cfg[i].tiltMs) mqtt.subscribe(blindTopic(i, "tilt/set").c_str());
     mqtt.subscribe(blindTopic(i, "interlock").c_str());
   }
   publishDiscovery();
@@ -1087,6 +1155,19 @@ bool handleBlindCommand(size_t i, String cmd, const String& source, String& err)
   const bool moving = cmd != "STOP" && cmd != "SYNC_OPEN" && cmd != "SYNC_CLOSE";
   if (moving && st[i].windLocked && source != "wind") { err = "retracted for wind: it moves again when the wind drops"; return false; }
   if (moving && st[i].locked && source != "wind") { err = "locked: unlock it first"; return false; }
+  if (cmd == "TILT") {
+    // Turn the slats: a short run in the right direction, timed from tilt_ms, then Stop.
+    if (!cfg[i].tiltMs) { err = "this blind has no tilt time set"; return false; }
+    const int want = clampPos(arg.toInt());
+    const int cur = st[i].tilt < 0 ? (want >= 50 ? 0 : 100) : st[i].tilt;
+    const int pos = estimate(i);
+    if (pos < 0) { err = "position unknown: open or close it fully once"; return false; }
+    const int dpos = static_cast<int>(lround((want - cur) * static_cast<double>(cfg[i].tiltMs) / travelMs(i, want > cur ? Motion::Opening : Motion::Closing)));
+    st[i].tilt = want;
+    st[i].dirty = true;
+    if (!dpos) return true;
+    return moveTo(i, clampPos(pos + dpos), source, err);
+  }
   if (cmd == "PRESET") {
     for (int k = 0; k < 4; ++k) {
       if (cfg[i].presetPos[k] < 0) continue;
@@ -1398,6 +1479,12 @@ void checkSchedules() {
 void finishPress() {
   if (!pressActive || millis() - lastPayloadMs < 500) return;
   pressActive = false;
+  if (remote.repeat && repeatPayload && !learnMode) {
+    // Repeater: send the same press again from the bridge, for a motor out of the remote's reach.
+    String err;
+    if (transmitPayload(repeatPayload, err)) LOGI("Repeated the remote's press");
+    repeatPayload = 0;
+  }
   if (lastPayloadMs - pressStartMs < 1500 || !mqtt.connected()) return;
   JsonDocument d;
   d["event_type"] = String(aok::actionName(pressAction)) + "_long";
@@ -1432,7 +1519,15 @@ void onPayload(uint64_t payload) {
   recordFrame(f, matched);
   if (repeat) return;
   lastRxFlashMs = now;
+  if (fromMain && f.mask && ((f.command >> 8) & 0xFF) == 0xAC) {
+    const uint16_t base = aok::deriveBase(f.remoteId, f.mask, f.command);
+    if (!remote.haveProg || remote.progBase != base) {
+      remote.progBase = base; remote.haveProg = true; saveRemote();
+      LOGI("Learned the remote's programming (P) button");
+    }
+  }
   if (f.action == aok::Action::Unknown || !f.mask) return;
+  if (matched && !learnMode) repeatPayload = payload;
 
   if (learnMode && learnExtra) {
     // Adding another remote: the first press from one the bridge doesn't know yet.
@@ -1533,9 +1628,16 @@ bool bodyJson(JsonDocument& d) {
   return true;
 }
 
+void buildState(JsonDocument& d, bool lite);
+
 void handleState() {
   const bool lite = web.hasArg("lite");  // frequent polls skip frames and calibration history
   JsonDocument d;
+  buildState(d, lite);
+  sendJson(d);
+}
+
+void buildState(JsonDocument& d, bool lite) {
   d["fw"] = FW_VERSION; d["uptime"] = millis() / 1000; d["heap"] = ESP.getFreeHeap();
   d["rev"] = stateRev; d["brand"] = net.brand; d["lite"] = lite;
   d["safe_mode"] = safeMode; d["wind"] = windActive;
@@ -1543,7 +1645,7 @@ void handleState() {
   for (size_t k = 0; k < sceneCount; ++k) { JsonObject x = scl.add<JsonObject>(); x["id"] = scenes[k].id; x["name"] = scenes[k].name; }
   d["reset_reason"] = static_cast<int>(esp_reset_reason());
   JsonObject w = d["wifi"].to<JsonObject>();
-  w["connected"] = WiFi.status() == WL_CONNECTED; w["ssid"] = net.ssid; w["ip"] = WiFi.localIP().toString();
+  w["connected"] = netUp(); w["ssid"] = net.ssid; w["ip"] = netIp().toString();
   w["rssi"] = WiFi.RSSI(); w["ap"] = apMode; w["hostname"] = net.hostname;
   JsonObject m = d["mqtt"].to<JsonObject>();
   m["configured"] = net.mqttHost.length() > 0; m["connected"] = mqtt.connected(); m["state"] = mqtt.state();
@@ -1594,7 +1696,30 @@ void handleState() {
   JsonObject c = d["calibration"].to<JsonObject>();
   c["active"] = calIndex >= 0;
   if (calIndex >= 0) { c["id"] = cfg[calIndex].id; c["name"] = cfg[calIndex].name; c["direction"] = motionName(calMotion); c["elapsed_ms"] = millis() - calStartMs; }
-  sendJson(d);
+  JsonObject pr = d["pairing"].to<JsonObject>();
+  pr["channel"] = pairChannel; pr["status"] = pairStatus;
+  d["live"] = true;  // this firmware pushes the state over a WebSocket on port 81
+#ifdef USE_ETH
+  d["build"] = "eth";
+#else
+  d["build"] = "wifi";
+#endif
+}
+
+// Live updates: push the light state to open pages several times a second while
+// anything moves, and on every change; a slow heartbeat otherwise.
+void pushLive() {
+  if (!ws.connectedClients()) return;
+  const uint32_t now = millis();
+  const bool busy = anyMoving() || calIndex >= 0 || learnMode || pairChannel;
+  const uint32_t every = busy ? 250 : (stateRev != lastWsRev ? 0 : 5000);
+  if (now - lastWsPushMs < every) return;
+  lastWsPushMs = now;
+  lastWsRev = stateRev;
+  JsonDocument d;
+  buildState(d, true);
+  String out; serializeJson(d, out);
+  ws.broadcastTXT(out);
 }
 
 void handleConfigGet() {
@@ -1935,6 +2060,85 @@ void handleLockPost() {
   sendOk();
 }
 
+// Pairing a channel's motor to the bridge's own ID. With the P button learned, the
+// bridge does it all: P, P (the motor jogs each time), then Up from its own ID.
+// Without it, press P twice on the hand remote, then "Pair now" sends the Up.
+void stepPairing() {
+  if (!pairChannel || static_cast<int32_t>(millis() - pairAtMs) < 0) return;
+  const uint16_t mask = 1u << (pairChannel - 1);
+  String err;
+  if (pairStage == 0 || pairStage == 1) {
+    if (!transmitPayload(aok::makePayload(remote.prefix, remote.remoteId, mask, remote.progBase), err)) { pairStatus = "failed: " + err; pairChannel = 0; return; }
+    pairStatus = pairStage == 0 ? "sent P once: the motor should jog" : "sent P twice: the motor should jog again";
+    pairStage++;
+    pairAtMs = millis() + 2500;
+    return;
+  }
+  if (!transmitPayload(aok::makePayload(remote.prefix, remote.ownId, mask, remote.base[0]), err)) { pairStatus = "failed: " + err; pairChannel = 0; return; }
+  remote.ownMask |= mask;
+  saveRemote();
+  pairStatus = String("sent Up from the bridge's ID on channel ") + pairChannel + ": if the motor jogged, it's paired";
+  LOGI("Pairing: %s", pairStatus.c_str());
+  pairChannel = 0;
+  stateRev++;
+}
+
+void handlePairPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  const String action = d["action"] | "";
+  const int ch = d["channel"] | 0;
+  if (action == "forget") {
+    if (ch >= 1 && ch <= 16) remote.ownMask &= ~(1u << (ch - 1)); else remote.ownMask = 0;
+    saveRemote(); stateRev++; LOGI("Pairing: channel %s back to the hand remote's ID", ch ? String(ch).c_str() : "all");
+    sendOk(); return;
+  }
+  if (ch < 1 || ch > 16) { sendError("choose a channel 1-16"); return; }
+  if (!remoteComplete()) { sendError("learn the remote first"); return; }
+  if (anyMoving()) { sendError("wait until the blinds stop", 409); return; }
+  if (!remote.ownId) {
+    remote.ownId = static_cast<uint8_t>((remote.remoteId + 0x5A) & 0xFF);
+    while (remote.ownId == remote.remoteId || remote.ownId == 0 || remoteKnown(remote.prefix, remote.ownId)) remote.ownId++;
+    saveRemote();
+  }
+  pairChannel = ch;
+  pairAtMs = millis();
+  if (action == "auto") {
+    if (!remote.haveProg) { pairChannel = 0; sendError("press the P button on the hand remote once first, so the bridge learns it"); return; }
+    pairStage = 0; pairStatus = "starting";
+  } else if (action == "now") {
+    pairStage = 2; pairStatus = "sending Up from the bridge's ID";
+  } else { pairChannel = 0; sendError("unknown action"); return; }
+  LOGI("Pairing channel %d to the bridge's ID %s (%s)", ch, hex(remote.ownId, 2).c_str(), action.c_str());
+  sendOk();
+}
+
+// Frequency scan: while someone holds a button on the hand remote, measure the
+// signal across 433.42-434.42 MHz and report where it's strongest.
+void handleFreqScan() {
+  if (!authed()) return;
+  if (!radioReady) { sendError("the radio isn't working"); return; }
+  if (anyMoving()) { sendError("wait until the blinds stop", 409); return; }
+  JsonDocument d;
+  JsonArray pts = d["points"].to<JsonArray>();
+  float best = pins.mhz; int bestRssi = -200;
+  rxStop();
+  for (float f = 433.42f; f <= 434.425f; f += 0.05f) {
+    ELECHOUSE_cc1101.setMHZ(f);
+    ELECHOUSE_cc1101.SetRx(f);
+    int peak = -200;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 180) { peak = max(peak, ELECHOUSE_cc1101.getRssi()); delay(2); }
+    JsonObject o = pts.add<JsonObject>(); o["mhz"] = f; o["rssi"] = peak;
+    if (peak > bestRssi) { bestRssi = peak; best = f; }
+  }
+  ELECHOUSE_cc1101.setMHZ(pins.mhz);
+  rxStart();
+  d["best_mhz"] = best; d["best_rssi"] = bestRssi; d["current_mhz"] = pins.mhz;
+  LOGI("Frequency scan: strongest at %.2f MHz (%d dBm)", best, bestRssi);
+  sendJson(d);
+}
+
 void handleReboot() { if (!authed()) return; LOGI("Restart requested from the web page"); sendOk(); scheduleReboot(800); }
 
 void handleLog() {
@@ -2056,6 +2260,8 @@ void setupWeb() {
   web.on("/api/automation", HTTP_POST, handleAutomationPost);
   web.on("/api/scene", HTTP_POST, handleScenePost);
   web.on("/api/lock", HTTP_POST, handleLockPost);
+  web.on("/api/pair", HTTP_POST, handlePairPost);
+  web.on("/api/freqscan", HTTP_POST, handleFreqScan);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   // Phones and Windows probe these when they join the setup Wi-Fi; answering them
   // directly opens the setup page and stops "request handler not found" log spam.
@@ -2066,6 +2272,8 @@ void setupWeb() {
   }
   web.onNotFound(handleNotFound);
   web.begin();
+  ws.begin();
+  ws.onEvent([](uint8_t, WStype_t type, uint8_t*, size_t) { if (type == WStype_CONNECTED) lastWsRev = 0; });
 }
 
 // ---------------------------------------------------------------- Improv Wi-Fi (serial)
@@ -2103,13 +2311,13 @@ void result(uint8_t cmd, std::initializer_list<String> strings) {
   d[0] = cmd; d[1] = static_cast<uint8_t>(k - 2);
   send(TypeRpcResult, d, k);
 }
-String url() { return String("http://") + WiFi.localIP().toString(); }
+String url() { return String("http://") + netIp().toString(); }
 
 void handle(const uint8_t* d, size_t n) {
   if (n < 2 || static_cast<size_t>(d[1]) + 2 > n) { error(ErrInvalid); return; }
   switch (d[0]) {
     case CmdState:
-      if (WiFi.status() == WL_CONNECTED) { state(StateProvisioned); result(CmdState, {url()}); }
+      if (netUp()) { state(StateProvisioned); result(CmdState, {url()}); }
       else state(StateReady);
       break;
     case CmdInfo:
@@ -2165,7 +2373,7 @@ void poll() {
     len = 0;
   }
   if (provisioning) {
-    if (WiFi.status() == WL_CONNECTED) { state(StateProvisioned); result(CmdWifi, {url()}); provisioning = false; }
+    if (netUp()) { state(StateProvisioned); result(CmdWifi, {url()}); provisioning = false; }
     else if (millis() - provisionStartMs > 20000) { error(ErrConnect); state(StateReady); provisioning = false; }
   }
 }
@@ -2193,9 +2401,22 @@ void stopAp() {
   apMode = false;
 }
 
+#ifdef USE_ETH
+void onEthEvent(WiFiEvent_t event) {
+  if (event == ARDUINO_EVENT_ETH_START) ETH.setHostname(net.hostname.c_str());
+  else if (event == ARDUINO_EVENT_ETH_GOT_IP) { ethUp = true; LOGI("Ethernet up, IP %s", ETH.localIP().toString().c_str()); }
+  else if (event == ARDUINO_EVENT_ETH_DISCONNECTED || event == ARDUINO_EVENT_ETH_STOP) { if (ethUp) LOGW("Ethernet down"); ethUp = false; }
+}
+#endif
+
 void setupWifi() {
   WiFi.persistent(false);
   WiFi.setHostname(net.hostname.c_str());
+#ifdef USE_ETH
+  WiFi.onEvent(onEthEvent);
+  ETH.begin(ETH_PHY_ADDR, ETH_PHY_POWER, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_TYPE, ETH_CLK_MODE);
+  if (!net.ssid.length()) { staStartMs = millis(); return; }  // the setup Wi-Fi opens only if the cable has no network
+#endif
   if (!net.ssid.length()) { startAp(); return; }
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -2204,11 +2425,11 @@ void setupWifi() {
 }
 
 void maintainWifi() {
-  const bool up = WiFi.status() == WL_CONNECTED;
+  const bool up = netUp();
   static bool wasUp = false;
   if (up != wasUp) {
     wasUp = up;
-    if (up) LOGI("Wi-Fi connected to %s, IP %s, signal %d dBm", net.ssid.c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    if (up) LOGI("Wi-Fi connected to %s, IP %s, signal %d dBm", net.ssid.c_str(), netIp().toString().c_str(), WiFi.RSSI());
     else if (net.ssid.length()) LOGW("Wi-Fi disconnected from %s", net.ssid.c_str());
   }
   if (up) {
@@ -2222,6 +2443,11 @@ void maintainWifi() {
       ArduinoOTA.begin();
       otaReady = true;
     }
+#ifdef USE_ETH
+  } else if (!net.ssid.length() && !apMode && millis() - staStartMs > 30000) {
+    LOGW("No network on the Ethernet cable after 30 s: opening the setup Wi-Fi");
+    startAp();
+#endif
   } else if (net.ssid.length() && !apMode && millis() - staStartMs > 45000) {
     LOGW("Can't join %s after 45 s: opening the setup Wi-Fi as well", net.ssid.c_str());
     startAp();  // can't join — open the setup portal but keep trying the home network
@@ -2292,6 +2518,9 @@ void loop() {
   updateMotion();
   finishPress();
   checkSchedules();
+  stepPairing();
+  ws.loop();
+  pushLive();
   if (crashCount && millis() > 120000) crashCount = 0;  // ran for 2 minutes: the crash streak is over
   if (mqtt.connected() && millis() - lastDiagMs > 30000) publishDiagnostics();
   if (calIndex >= 0 && millis() - calStartMs > 300000) calIndex = -1;

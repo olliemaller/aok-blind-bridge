@@ -96,6 +96,10 @@ jobs:
           gh release download "$tag" -D site/firmware -p '*.bin'
           cp site/firmware/aok-blind-bridge-$v-factory.bin site/firmware/aok-blind-bridge-factory.bin
           cp site/firmware/aok-blind-bridge-$v-ota.bin site/firmware/aok-blind-bridge-ota.bin
+          if [ -f site/firmware/aok-blind-bridge-$v-eth-ota.bin ]; then
+            cp site/firmware/aok-blind-bridge-$v-eth-ota.bin site/firmware/aok-blind-bridge-eth-ota.bin
+            cp site/firmware/aok-blind-bridge-$v-eth-factory.bin site/firmware/aok-blind-bridge-eth-factory.bin
+          fi
           cat > site/firmware/manifest.json <<JSON
           {
             "name": "A-OK Blind Bridge",
@@ -106,6 +110,7 @@ jobs:
               { "chipFamily": "ESP32", "parts": [ { "path": "aok-blind-bridge-factory.bin", "offset": 0 } ] }
             ],
             "ota": "aok-blind-bridge-ota.bin",
+            "ota_eth": "aok-blind-bridge-eth-ota.bin",
             "notes_url": "https://github.com/${{ github.repository }}/releases/tag/$tag"
           }
           JSON

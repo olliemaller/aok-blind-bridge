@@ -72,5 +72,5 @@ For each of Up, Down and Stop, the bridge keeps the 16-bit `button<<8 | base` va
 ## Open questions
 
 - Older A-OK remotes (AC114 and similar) use a shorter format. The decoder ignores them.
-- The pairing (P) sequence and limit setting aren't implemented. Pair and set limits with the original remote. The bridge only ever acts as a copy of that remote.
+- **Pairing to the bridge's own ID (experimental, 1.6.0).** The bridge learns the P button (`AC`) when it's pressed on the hand remote. *Pair automatically* then sends P twice on the channel from the hand remote's ID (the usual "P, P" that puts an A-OK motor in pairing mode) and Up from the bridge's own ID: the same prefix and button bases with a different remote ID. Whether a motor accepts a new ID built this way hasn't been confirmed on every motor yet. Limit setting isn't implemented: set limits with the original remote.
 - If your remote's frames don't decode, the Activity tab and the log will still show what the radio picks up. Please open an issue with them.

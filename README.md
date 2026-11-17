@@ -19,6 +19,7 @@ Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an 
 - **Scenes and schedules on the bridge.** Scenes move several blinds to set positions. Schedules run at a time, at sunrise or at sunset (with an offset), on chosen days, even when Home Assistant is down.
 - **Named positions, locks, windows and wind.** Up to four named positions per blind. Lock a blind so automations leave it alone. A window sensor can stop a blind closing, and a wind sensor retracts awnings.
 - **Safe moves.** Reversing a moving blind stops it first. A blind in an unknown position goes to the nearer end first, then to the %. A start-up delay per blind makes short moves accurate.
+- **Experimental: pairs motors to its own remote ID**, so a lost hand remote doesn't matter. Also a repeater for far motors, a frequency scan, tilt for venetian blinds, live page updates, and an Ethernet build for the WT32-ETH01.
 - **Follows more than one remote**, reports long presses, and shows the signal strength of each frame. After three crashes in a row it starts in safe mode, so the page and updates still work.
 - **Shows up in Home Assistant on its own** through MQTT discovery. You get a cover per blind, put in the room you set, plus a remote-button event entity for automations.
 - **Runs from its own web page:**
