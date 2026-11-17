@@ -516,7 +516,7 @@ let calLast=null;       // {id,dir} of the last finished measurement
 function toast(msg,err){const t=$('toast');t.textContent=msg;t.className=err?'show err':'show';clearTimeout(t._h);t._h=setTimeout(()=>t.className=err?'err':'',3200)}
 async function api(url,body){
   try{
-    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Bridge':'1'},body:JSON.stringify(body||{})});
     const j=await r.json().catch(()=>({}));
     if(!r.ok||j.ok===false){toast(cap(j.error||('Error '+r.status)),true);return null}
     refresh(true);return j;
@@ -632,6 +632,7 @@ function drawBlinds(){
   const al=[];
   if(!S.radio.ready)al.push(banner('bad','alert','<b>The radio isn\'t responding.</b> Check the CC1101 wiring.','Wiring',"go('settings','set-radio')"));
   if(!S.remote.complete)al.push(banner('warn','remote','<b>Learn your remote first.</b> The bridge copies it to control the blinds.','Learn remote',"go('remote')"));
+  if(C&&C.network&&!C.network.admin_set&&!(S.wifi&&S.wifi.ap))al.push(banner('warn','alert','<b>No admin password.</b> Anyone on your network can open this page, move the blinds and change the settings. Over-the-air updates from PlatformIO stay off until you set one.','Set password',"go('settings')"));
   $('blindAlerts').innerHTML=al.join('');
   const list=$('blindList');
   $('allBar').innerHTML=S.blinds.length>1?`<div class="card allbar"><b>All blinds</b>
@@ -750,6 +751,7 @@ function drawEditors(){
       <label class="field" style="grid-column:span 2"><span>&nbsp;</span><small style="padding-top:8px">Blinds are grouped by room here, and Home Assistant puts them in that area.</small></label>
       <label class="field"><span>Opening time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.open_ms)}" oninput="edit[${i}].open_ms=Math.round(this.value*1000);markDirty()"></label>
       <label class="field"><span>Closing time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.close_ms)}" oninput="edit[${i}].close_ms=Math.round(this.value*1000);markDirty()"></label>
+      <label class="field"><span>Start-up delay (s)</span><input type="number" step="0.1" min="0" max="3" placeholder="0" value="${b.start_ms?secs(b.start_ms):''}" oninput="edit[${i}].start_ms=Math.round((parseFloat(this.value)||0)*1000);markDirty()"><small>How long the motor takes to start after a command. Makes short moves land closer to the target.</small></label>
       <label class="field"><span>Favourite position (%)</span><input type="number" min="0" max="100" placeholder="None" value="${b.favourite>=0?b.favourite:''}" oninput="edit[${i}].favourite=this.value===''?-1:Math.max(0,Math.min(100,parseInt(this.value)||0));markDirty()"></label>
     </div>
     <div class="btns">
@@ -777,7 +779,7 @@ function addBlind(ch){
   if(edit.length>=16)return toast('The bridge supports up to 16 blinds',true);
   const c=ch||nextChannel();
   const k='new'+(++edKey);openEd.add(k);
-  edit.push({_k:k,name:'Blind '+c,room:'',channels:String(c),open_ms:30000,close_ms:30000,favourite:-1,device_class:'shade',invert:false});
+  edit.push({_k:k,name:'Blind '+c,room:'',channels:String(c),open_ms:30000,close_ms:30000,start_ms:0,favourite:-1,device_class:'shade',invert:false});
   markDirty();drawEditors();
 }
 function addMissing(){
@@ -870,7 +872,7 @@ function fillSettings(){
   const tzSel=$('n_tz');
   if(!tzSel.options.length)tzSel.innerHTML=TZS.map(([z])=>`<option value="${z}">${z.replace(/_/g,' ').replace('/',' / ')}</option>`).join('');
   if(document.activeElement!==tzSel&&!tzSel.dataset.touched){const name=n.tz_name||(TZS.find(t=>t[1]==n.tz)||[])[0]||'UTC';tzSel.value=name}
-  if(!n.tz&&!autoTzDone){autoTzDone=true;const z=Intl.DateTimeFormat().resolvedOptions().timeZone,m=TZS.find(t=>t[0]==z);if(m)fetch('/api/network',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tz:m[1],tz_name:m[0]})}).then(()=>loadConfig())}
+  if(!n.tz&&!autoTzDone){autoTzDone=true;const z=Intl.DateTimeFormat().resolvedOptions().timeZone,m=TZS.find(t=>t[0]==z);if(m)fetch('/api/network',{method:'POST',headers:{'Content-Type':'application/json','X-Bridge':'1'},body:JSON.stringify({tz:m[1],tz_name:m[0]})}).then(()=>loadConfig())}
   $('hostHint').innerHTML=`Open the page at <span class="mono">http://${esc(n.hostname)}.local</span>`;
   const P=[['sck','SCK',5],['miso','MISO',7],['mosi','MOSI',6],['cs','CSN',4],['gdo0','GDO0 (send)',3],['gdo2','GDO2 (receive)',8]];
   $('wiring').innerHTML='<tr><th>CC1101 pin</th><th>ESP32 GPIO</th></tr><tr><td>VCC (pin 2)</td><td>3V3 <span class="faint small">not 5V</span></td></tr><tr><td>GND (pin 1)</td><td>GND</td></tr>'+P.map(([k,l,n])=>`<tr><td>${l} (pin ${n})</td><td>${C.pins[k]}</td></tr>`).join('');
@@ -955,7 +957,7 @@ async function testMqtt(){
   const b=$('testBtn'),out=$('mqttTest');b.disabled=true;b.textContent='Testing…';out.textContent='';
   const body={host:$('n_mqtt_host').value.trim(),port:parseInt($('n_mqtt_port').value)||1883,user:$('n_mqtt_user').value.trim()};
   if($('n_mqtt_pass').value)body.pass=$('n_mqtt_pass').value;
-  try{const r=await fetch('/api/mqtt/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();
+  try{const r=await fetch('/api/mqtt/test',{method:'POST',headers:{'Content-Type':'application/json','X-Bridge':'1'},body:JSON.stringify(body)});const j=await r.json();
     out.innerHTML=j.ok===false?`<span style="color:var(--bad)">${esc(cap(j.error))}</span>`:`<span style="color:var(${j.connected?'--ok':'--bad'})">${esc(j.message)}</span>${j.connected?' Press Save to use them.':''}`}
   catch(e){out.innerHTML='<span style="color:var(--bad)">The bridge didn\'t answer.</span>'}
   b.disabled=false;b.textContent='Test connection';
@@ -973,7 +975,7 @@ function sendFirmware(f){
   x.upload.onprogress=e=>{if(e.lengthComputable)bar.firstChild.style.width=(e.loaded/e.total*100)+'%'};
   x.onload=()=>{$('fwBtn').disabled=false;const ok=x.status==200;$('fwMsg').textContent=ok?'Updated. The bridge is restarting; this page reloads in 15 seconds.':'Update failed: '+x.responseText;if(ok)setTimeout(()=>location.reload(),15000)};
   x.onerror=()=>{$('fwBtn').disabled=false;$('fwMsg').textContent='Upload failed: the bridge stopped responding.'};
-  x.open('POST','/update');x.send(fd);
+  x.open('POST','/update');x.setRequestHeader('X-Bridge','1');x.send(fd);
 }
 
 /* ---------- start ---------- */

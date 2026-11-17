@@ -25,6 +25,7 @@ If **Radio** is red, the ESP32 can't talk to the CC1101. Check that VCC goes to 
 - **Name** and **Room**. The room becomes its area in Home Assistant.
 - **Remote channel**. Pick more than one to make a group that moves together.
 - **Opening and closing time.** The Calibrate tab measures these.
+- **Start-up delay.** How long the motor takes to start after a command (usually 0.3–1 s). Set it if short moves stop short of the target.
 - **Favourite position** (optional). The ★ button sends the blind there.
 - **Reversed.** Tick it if Up closes this blind.
 
@@ -47,6 +48,6 @@ Each measurement is saved and added to the calibration log. Do it again any time
 
 - **Blind brand.** Sets the name used in the title, the setup Wi-Fi and Home Assistant, for example `Motolux`.
 - **Time zone.** Set automatically from your browser the first time. It's used for log and calibration times.
-- **Web page password.** Adds a login (user `admin`) to the page and OTA updates.
+- **Web page password.** Adds a login (user `admin`) to the page. Set one: until you do, the dashboard shows a warning, and over-the-air updates from PlatformIO (`espota`) stay off. Updates from the page itself always work.
 - **Backup.** Downloads your blinds, remote codes, pins and settings (no passwords). **Restore from file** loads them onto another board.
 - **Logs.** The last 120 events: commands, remote presses, connections, calibrations and errors. Download them when reporting a problem.

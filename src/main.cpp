@@ -24,7 +24,7 @@
 #include "aok_protocol.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.3.0"
+#define FW_VERSION "1.4.0"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -56,6 +56,7 @@ constexpr size_t kMaxBlinds = 16;
 constexpr size_t kMaxFrames = 12;
 constexpr size_t kRingSize = 2048;  // power of two
 constexpr uint32_t kDedupeMs = 900;
+constexpr uint32_t kReversePauseMs = 700;  // stop → reverse gap that protects the motor
 
 enum class Motion : uint8_t { Stopped, Opening, Closing };
 
@@ -89,6 +90,7 @@ struct BlindCfg {
   String id, name, room, deviceClass = "shade";
   uint16_t mask = 1;
   uint32_t openMs = 30000, closeMs = 30000;
+  uint16_t startMs = 0;  // motor start-up lag: time between the radio frame and the blind actually moving
   bool invert = false;
   int favourite = -1;
 };
@@ -100,6 +102,9 @@ struct BlindState {
   Motion motion = Motion::Stopped;
   uint32_t startMs = 0, durMs = 0;
   bool autoStop = false;
+  int after = -1;              // after an endpoint run, go on to this position (reference run)
+  int pending = -1;            // reverse requested while moving: go here once the motor has stopped
+  uint32_t pendingAtMs = 0;
   uint32_t lastPublishMs = 0;
   String lastSource = "none";
   bool dirty = true;
@@ -127,11 +132,15 @@ PubSubClient mqtt(wifiClient);
 
 bool radioReady = false, apMode = false, otaReady = false, mdnsReady = false;
 bool learnMode = false, rebootPending = false, discoveryPending = true;
+bool learnLocked = false;            // a learn session sticks to the first remote it hears
+uint32_t learnPrefix = 0;
+uint8_t learnRemoteId = 0;
 uint32_t stateRev = 1;               // bumps when frames, calibration history or config change (page refetches)
 bool positionsDirty = false;         // positions are written to flash a few seconds after things settle
 uint32_t positionsDirtyMs = 0;
 uint32_t learnStartedMs = 0, rebootAtMs = 0, lastMqttTryMs = 0, lastDiagMs = 0, staStartMs = 0;
 uint32_t lastTxMs = 0, lastRxFlashMs = 0;
+uint32_t mqttRetryMs = 5000;           // grows to 60 s while the broker is unreachable
 HeardFrame frames[kMaxFrames];
 size_t frameCount = 0, frameHead = 0;
 uint64_t lastPayload = 0;
@@ -164,6 +173,8 @@ volatile int rxPin = -1;
 aok::Decoder decoder;
 
 // ---------------------------------------------------------------- helpers
+bool anyMoving();
+void sendError(const String& msg, int code);
 int clampPos(int v) { return v < 0 ? 0 : (v > 100 ? 100 : v); }
 
 String hex(uint64_t v, int digits) {
@@ -324,6 +335,7 @@ void loadRemote() {
 void blindToJson(size_t i, JsonObject o) {
   o["id"] = cfg[i].id; o["name"] = cfg[i].name; o["channels"] = maskText(cfg[i].mask);
   o["open_ms"] = cfg[i].openMs; o["close_ms"] = cfg[i].closeMs; o["invert"] = cfg[i].invert;
+  o["start_ms"] = cfg[i].startMs;
   o["favourite"] = cfg[i].favourite; o["device_class"] = cfg[i].deviceClass; o["room"] = cfg[i].room;
 }
 
@@ -355,6 +367,7 @@ bool blindsFromJson(JsonArrayConst arr, String& err) {
     b.openMs = constrain(static_cast<uint32_t>(o["open_ms"] | 30000), 1000u, 300000u);
     b.closeMs = constrain(static_cast<uint32_t>(o["close_ms"] | 30000), 1000u, 300000u);
     b.invert = o["invert"] | false;
+    b.startMs = constrain(static_cast<int>(o["start_ms"] | 0), 0, 3000);
     b.favourite = o["favourite"] | -1;
     if (b.favourite > 100) b.favourite = 100;
     b.deviceClass = o["device_class"] | "shade";
@@ -526,7 +539,8 @@ uint32_t travelMs(size_t i, Motion m) { return max<uint32_t>(m == Motion::Closin
 int estimate(size_t i) {
   const BlindState& s = st[i];
   if (s.motion == Motion::Stopped || s.startPos < 0) return s.position;
-  const uint32_t elapsed = millis() - s.startMs;
+  uint32_t elapsed = millis() - s.startMs;
+  elapsed = elapsed > cfg[i].startMs ? elapsed - cfg[i].startMs : 0;  // the motor hasn't moved yet
   int delta = static_cast<int>((static_cast<uint64_t>(elapsed) * 100) / travelMs(i, s.motion));
   if (delta > 100) delta = 100;
   return clampPos(s.startPos + (s.motion == Motion::Opening ? delta : -delta));
@@ -553,7 +567,7 @@ void beginMotion(size_t i, Motion m, int target, bool autoStop, const String& so
   s.target = clampPos(target);
   s.motion = m;
   s.startMs = millis();
-  s.durMs = static_cast<uint32_t>(abs(s.target - cur)) * travelMs(i, m) / 100;
+  s.durMs = static_cast<uint32_t>(abs(s.target - cur)) * travelMs(i, m) / 100 + cfg[i].startMs;
   if (!autoStop) s.durMs += 1500;  // endpoint runs: motor stops itself at its limit
   s.autoStop = autoStop;
   s.lastSource = source;
@@ -587,6 +601,7 @@ void applyAction(uint16_t mask, aok::Action action, const String& source, int co
 }
 
 bool groupPosition(size_t g, int& pos, Motion& motion);
+bool stopBlind(size_t i, const String& source, String& err);
 
 bool moveTo(size_t i, int target, const String& source, String& err) {
   target = clampPos(target);
@@ -595,11 +610,29 @@ bool moveTo(size_t i, int target, const String& source, String& err) {
     st[i].position = st[i].startPos = gp;  // a group starts from where its members actually are
   }
   int cur = estimate(i);
+  st[i].after = -1;
   if (cur < 0 && target > 0 && target < 100) {
-    err = "position unknown — open or close fully once (or use Mark open/closed)";
-    return false;
+    // Position unknown: run to the nearer end first (a reference run), then on to the target.
+    if (!remote.have[2]) { err = "learn the Stop button first"; return false; }
+    const int end = target >= 50 ? 100 : 0;
+    if (!moveTo(i, end, source, err)) return false;
+    st[i].after = target;
+    LOGI("%s: position unknown, running to %s first", cfg[i].name.c_str(), end ? "open" : "closed");
+    return true;
   }
   if (cur == target && st[i].motion == Motion::Stopped) { st[i].dirty = true; return true; }
+  if (st[i].motion != Motion::Stopped && cur >= 0) {
+    const Motion want = target > cur ? Motion::Opening : Motion::Closing;
+    if (want != st[i].motion) {
+      // Reversing a running tubular motor in one step strains it: stop, pause, then go.
+      if (!stopBlind(i, source, err)) return false;
+      st[i].pending = target;
+      st[i].pendingAtMs = millis() + kReversePauseMs;
+      st[i].lastSource = source;
+      return true;
+    }
+  }
+  st[i].pending = -1;
   if (cur < 0) cur = target == 100 ? 0 : 100;
   const Motion m = target > cur ? Motion::Opening : Motion::Closing;
   if (target > 0 && target < 100 && !remote.have[2]) { err = "learn the Stop button first"; return false; }
@@ -609,6 +642,8 @@ bool moveTo(size_t i, int target, const String& source, String& err) {
 }
 
 bool stopBlind(size_t i, const String& source, String& err) {
+  st[i].pending = -1;
+  st[i].after = -1;
   if (!sendAction(cfg[i].mask, aok::Action::Stop, err)) return false;
   applyAction(cfg[i].mask, aok::Action::Stop, source, static_cast<int>(i), -1);
   return true;
@@ -824,7 +859,7 @@ void onMqtt(char* t, byte* payload, unsigned int len) {
   msg.reserve(len);
   for (unsigned int k = 0; k < len; ++k) msg += static_cast<char>(payload[k]);
   if (!msg.length()) return;
-  if (tp == topic("learn/set")) { learnMode = true; learnStartedMs = millis(); learnStatus = "waiting"; return; }
+  if (tp == topic("learn/set")) { learnMode = true; learnLocked = false; learnStartedMs = millis(); learnStatus = "waiting"; return; }
   if (tp == topic("all/set")) { String err; if (!allBlinds(msg, "home_assistant", err)) LOGW("All blinds: %s", err.c_str()); return; }
   for (size_t i = 0; i < blindCount; ++i) {
     if (tp == blindTopic(i, "set") || tp == blindTopic(i, "set_position")) {
@@ -839,8 +874,12 @@ void onMqtt(char* t, byte* payload, unsigned int len) {
 void ensureMqtt() {
   if (apMode && WiFi.status() != WL_CONNECTED) return;
   if (WiFi.status() != WL_CONNECTED || !net.mqttHost.length() || mqtt.connected()) return;
-  if (millis() - lastMqttTryMs < 5000 && lastMqttTryMs) return;
+  if (lastMqttTryMs && millis() - lastMqttTryMs < mqttRetryMs) return;
+  // Connecting can block for seconds when the broker is down; a blind waiting for its
+  // timed Stop must never wait behind it.
+  if (anyMoving()) return;
   lastMqttTryMs = millis();
+  mqtt.setSocketTimeout(3);
   mqtt.setServer(net.mqttHost.c_str(), net.mqttPort);
   const String clientId = net.base + "_" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
   const String will = topic("status");
@@ -850,9 +889,11 @@ void ensureMqtt() {
   if (!ok) {
     const int st = mqtt.state();
     const char* why = st == 5 ? "username or password rejected" : st == 4 ? "bad username or password" : st == -2 ? "broker not reachable" : st == -4 ? "connection timed out" : "connection failed";
-    LOGW("MQTT %s:%u: %s (code %d)", net.mqttHost.c_str(), net.mqttPort, why, st);
+    LOGW("MQTT %s:%u: %s (code %d), next try in %u s", net.mqttHost.c_str(), net.mqttPort, why, st, mqttRetryMs / 1000);
+    mqttRetryMs = min<uint32_t>(mqttRetryMs * 2, 60000);
     return;
   }
+  mqttRetryMs = 5000;
   LOGI("MQTT connected to %s:%u", net.mqttHost.c_str(), net.mqttPort);
   mqtt.publish(will.c_str(), "online", true);
   mqtt.subscribe(topic("learn/set").c_str());
@@ -896,9 +937,23 @@ bool handleBlindCommand(size_t i, String cmd, const String& source, String& err)
   return false;
 }
 
+bool anyMoving() {
+  for (size_t i = 0; i < blindCount; ++i)
+    if (st[i].motion != Motion::Stopped || st[i].pending >= 0) return true;
+  return false;
+}
+
 void updateMotion() {
   const uint32_t now = millis();
   bool anyStopped = false;
+  for (size_t i = 0; i < blindCount; ++i) {  // reversals waiting out their pause
+    BlindState& s = st[i];
+    if (s.pending < 0 || static_cast<int32_t>(now - s.pendingAtMs) < 0) continue;
+    const int target = s.pending;
+    s.pending = -1;
+    String err;
+    if (!moveTo(i, target, s.lastSource, err)) LOGW("%s: %s", cfg[i].name.c_str(), err.c_str());
+  }
   for (size_t i = 0; i < blindCount; ++i) {
     BlindState& s = st[i];
     if (s.motion == Motion::Stopped) continue;
@@ -916,6 +971,12 @@ void updateMotion() {
     } else {
       haltMotion(i, s.lastSource);
       s.position = s.startPos = s.target = goal;  // endpoint reached: motor stops at its limit
+      if (s.after >= 0) {  // reference run finished: now go where we were asked to
+        const int next = s.after;
+        s.after = -1;
+        String err;
+        if (!moveTo(i, next, s.lastSource, err)) LOGW("%s: %s", cfg[i].name.c_str(), err.c_str());
+      }
     }
     s.dirty = true;
     anyStopped = true;
@@ -958,6 +1019,12 @@ void onPayload(uint64_t payload) {
   if (f.action == aok::Action::Unknown || !f.mask) return;
 
   if (learnMode) {
+    if (learnLocked && (f.prefix != learnPrefix || f.remoteId != learnRemoteId)) {
+      // Someone else's remote (a neighbour's?) mid-learning: ignore it, don't start over.
+      learnStatus = String("ignored another remote (") + hex(f.remoteId, 2) + "), keep pressing yours";
+      return;
+    }
+    if (!learnLocked) { learnLocked = true; learnPrefix = f.prefix; learnRemoteId = f.remoteId; }
     const bool sameRemote = f.prefix == remote.prefix && f.remoteId == remote.remoteId;
     if (!sameRemote) { for (bool& h : remote.have) h = false; remote.seen = 0; }
     remote.prefix = f.prefix;
@@ -999,7 +1066,21 @@ void pollRadio() {
 }
 
 // ---------------------------------------------------------------- web
+// Requests that change something must come from the bridge's own page. A web page
+// on another site can make the browser send a simple POST (a form, or text/plain
+// JSON) to this address, but it can't add a custom header without a CORS
+// preflight, which this server never approves. The browser also re-sends a saved
+// Basic-auth login, so the password alone doesn't stop that.
+bool fromOwnPage() {
+  if (web.method() != HTTP_POST) return true;
+  if (web.header("X-Bridge") == "1") return true;
+  LOGW("Refused %s: not sent by the bridge's own page", web.uri().c_str());
+  sendError("refused: requests must come from the bridge's own page", 403);
+  return false;
+}
+
 bool authed() {
+  if (!fromOwnPage()) return false;
   if (!net.adminPass.length()) return true;
   if (web.authenticate("admin", net.adminPass.c_str())) return true;
   web.requestAuthentication(BASIC_AUTH, "Blind Bridge");
@@ -1142,7 +1223,7 @@ void handleRemotePost() {
   if (!authed()) return;
   JsonDocument d; if (!bodyJson(d)) return;
   const String action = d["action"] | "";
-  if (action == "learn") { learnMode = true; learnStartedMs = millis(); learnStatus = "waiting"; LOGI("Remote learning started"); }
+  if (action == "learn") { learnMode = true; learnLocked = false; learnStartedMs = millis(); learnStatus = "waiting"; LOGI("Remote learning started"); }
   else if (action == "cancel") { learnMode = false; learnStatus = "cancelled"; }
   else if (action == "forget") { for (bool& h : remote.have) h = false; remote.prefix = 0; remote.remoteId = 0; remote.seen = 0; saveRemote(); learnStatus = "idle"; LOGI("Remote forgotten"); }
   else if (action == "save") { remoteFromJson(d["remote"].as<JsonObjectConst>()); saveRemote(); }
@@ -1245,6 +1326,7 @@ bool portOpen(const IPAddress& ip, uint16_t port) {
 // (_home-assistant._tcp or homeassistant.local) with something listening on 1883.
 void handleMqttDiscover() {
   if (!authed()) return;
+  if (anyMoving()) { sendError("blinds are moving: search again when they've stopped", 409); return; }
   if (WiFi.status() != WL_CONNECTED) { sendError("join your Wi-Fi first, then search for the broker"); return; }
   if (!mdnsReady && MDNS.begin(net.hostname.c_str())) { MDNS.addService("http", "tcp", 80); mdnsReady = true; }
   JsonDocument d;
@@ -1268,6 +1350,7 @@ void handleMqttDiscover() {
 // Tries a login with the settings on the page (saved password used if the box is blank).
 void handleMqttTest() {
   if (!authed()) return;
+  if (anyMoving()) { sendError("blinds are moving: test again when they've stopped", 409); return; }
   JsonDocument d; if (!bodyJson(d)) return;
   if (WiFi.status() != WL_CONNECTED) { sendError("the bridge isn't on Wi-Fi yet"); return; }
   const String host = d["host"] | net.mqttHost;
@@ -1403,20 +1486,54 @@ void handleLog() {
   sendJson(d);
 }
 
+bool updateAllowed = false;  // set at the start of an upload once it has passed the checks
+
 void handleUpdateDone() {
   if (!authed()) return;
-  const bool ok = !Update.hasError();
+  const bool ok = updateAllowed && !Update.hasError();
+  updateAllowed = false;
   if (ok) LOGI("Firmware updated, restarting"); else LOGE("Firmware update failed: %s", Update.errorString());
   web.send(ok ? 200 : 500, "text/plain", ok ? "Update OK — rebooting" : "Update failed");
   if (ok) scheduleReboot(1000);
 }
 
 void handleUpdateUpload() {
-  if (net.adminPass.length() && !web.authenticate("admin", net.adminPass.c_str())) return;
   HTTPUpload& up = web.upload();
-  if (up.status == UPLOAD_FILE_START) { LOGI("Firmware upload started: %s", up.filename.c_str()); rxStop(); Update.begin(UPDATE_SIZE_UNKNOWN); }
-  else if (up.status == UPLOAD_FILE_WRITE) Update.write(up.buf, up.currentSize);
-  else if (up.status == UPLOAD_FILE_END) Update.end(true);
+  if (up.status == UPLOAD_FILE_START) {
+    updateAllowed = web.header("X-Bridge") == "1" &&
+                    (!net.adminPass.length() || web.authenticate("admin", net.adminPass.c_str()));
+    if (!updateAllowed) { LOGW("Refused a firmware upload that didn't come from the bridge's own page"); return; }
+    LOGI("Firmware upload started: %s", up.filename.c_str());
+    rxStop();
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      LOGE("Firmware update can't start: %s", Update.errorString());
+      updateAllowed = false;
+      rxStart();
+    }
+    return;
+  }
+  if (!updateAllowed) return;
+  if (up.status == UPLOAD_FILE_WRITE) {
+    if (Update.progress() == 0 && up.currentSize && up.buf[0] != 0xE9) {  // ESP32 app images start with 0xE9
+      LOGE("That file isn't ESP32 firmware (use the .bin from the release, not the -full or -factory image)");
+      Update.abort();
+      updateAllowed = false;
+      rxStart();
+      return;
+    }
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) {
+      LOGE("Firmware write failed: %s", Update.errorString());
+      Update.abort();
+      updateAllowed = false;
+      rxStart();
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (!Update.end(true)) { LOGE("Firmware check failed: %s", Update.errorString()); rxStart(); }
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    updateAllowed = false;
+    rxStart();
+  }
 }
 
 void handleRoot() {
@@ -1435,8 +1552,8 @@ void handleNotFound() {
 }
 
 void setupWeb() {
-  static const char* kHeaders[] = {"If-None-Match"};
-  web.collectHeaders(kHeaders, 1);
+  static const char* kHeaders[] = {"If-None-Match", "X-Bridge"};
+  web.collectHeaders(kHeaders, 2);
   web.on("/", HTTP_GET, handleRoot);
   web.on("/api/backup", HTTP_GET, handleBackup);
   web.on("/api/restore", HTTP_POST, handleRestore);
@@ -1613,9 +1730,9 @@ void maintainWifi() {
     if (!ntpStarted) { configTzTime(net.tz.length() ? net.tz.c_str() : "UTC0", "pool.ntp.org", "time.google.com"); ntpStarted = true; }
     if (apMode && millis() - staStartMs > 5000) stopAp();
     if (!mdnsReady && MDNS.begin(net.hostname.c_str())) { MDNS.addService("http", "tcp", 80); mdnsReady = true; }
-    if (!otaReady) {
+    if (!otaReady && net.adminPass.length()) {  // PlatformIO/espota updates need the admin password
       ArduinoOTA.setHostname(net.hostname.c_str());
-      if (net.adminPass.length()) ArduinoOTA.setPassword(net.adminPass.c_str());
+      ArduinoOTA.setPassword(net.adminPass.c_str());
       ArduinoOTA.onStart([]() { rxStop(); });
       ArduinoOTA.begin();
       otaReady = true;

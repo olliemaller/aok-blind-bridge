@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.4.0] - 2026-11-17
+
+### Security
+- **Only the bridge's own page can change things.** Before, any website opened on a phone or computer on your network could send the bridge commands, or even new firmware, without you seeing it (cross-site requests). Every change now needs a header that only the bridge's page sends. Other sites can't add it.
+- **PlatformIO over-the-air updates need the admin password.** With no password they're now off. Updates from the web page keep working.
+- **Firmware uploads are checked as they arrive.** A file that isn't ESP32 firmware, a failed write or a cancelled upload stops straight away with a clear message in the log.
+- A warning on the dashboard while no admin password is set.
+
+### Fixed
+- **Blinds went past their target when the MQTT broker was down.** The bridge froze for a few seconds each time it retried the broker. If that happened during a "go to 30 %" run, the Stop was sent late. Broker retries now wait until no blind is moving, back off to once a minute, and time out sooner. *Find broker* and *Test connection* wait for the blinds to stop too.
+- **A neighbour's remote could wipe remote learning.** A learning session now sticks to the first remote it hears, and the page says when it ignored another one.
+
+### Added
+- **Safe reversing.** Asking a moving blind to go the other way now stops it, waits 0.7 s, then reverses, instead of flipping the motor's direction in one go.
+- **Reference run.** Asking for a position like 40 % when the bridge doesn't know where the blind is now runs it to the nearer end first, then on to 40 %, instead of refusing.
+- **Start-up delay** per blind (*Set up blinds*): the time the motor takes to start after a command. Short moves land closer to the target.
+
 ## [1.3.0] - 2026-11-14
 
 ### Added
