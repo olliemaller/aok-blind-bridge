@@ -16,6 +16,12 @@ blinds.append(dict(id="lounge", name="Lounge (both)", channels="1,2", open_ms=24
 state = {b["id"]: dict(pos=[100, 60, 0, 35, 100, -1, 80][i], motion="stopped", start=0, startpos=0, goal=0) for i, b in enumerate(blinds)}
 remote = dict(prefix="A1B2C3", remote_id="3F", open="F42A", close="BCF2", stop="DC12", listen=True, seen="1,2,3,4,5,6,7")
 cal = dict(active=False)
+AUTO = dict(latitude=-37.81, longitude=144.96,
+            scenes=[dict(id="movie", name="Movie", blinds=[dict(id="lounge_left", position=0), dict(id="lounge_right", position=0)])],
+            schedules=[dict(enabled=True, days=31, when="time", minutes=420, target="all", action="OPEN"),
+                       dict(enabled=True, days=127, when="sunset", minutes=15, target="scene:movie", action="OPEN")])
+locks = set()
+blinds[2]["presets"] = [dict(name="Privacy", position=30), dict(name="Half", position=50)]
 cal_hist = [dict(name="Kitchen", direction="close", ms=22140, previous_ms=30000, when=int(T0) - 3600)]
 logs = []
 def log(level, text):
@@ -56,11 +62,13 @@ def full_state():
                mqtt=dict(configured=True, connected=True, state=0),
                radio=dict(ready=True, overflow=0, mhz=433.92, last_tx_ago_s=12, last_rx_ago_s=4),
                remote=dict(remote, timings={}, complete=True, learning=False, learn_status="complete"),
-               blinds=[], frames=frames, cal_history=cal_hist,
+               blinds=[], frames=frames, cal_history=cal_hist, safe_mode=False, wind=False,
+               scenes=[dict(id=x["id"], name=x["name"]) for x in AUTO["scenes"]],
                calibration=dict(cal, elapsed_ms=int((time.time() - cal.get("t", 0)) * 1000)) if cal["active"] else dict(active=False))
     for b in blinds:
         s = state[b["id"]]; p = cur(b)
-        o = dict(b, position=p, motion=s["motion"], target=s["goal"], source="web", group="," in b["channels"])
+        o = dict(b, position=p, motion=s["motion"], target=s["goal"], source="web", group="," in b["channels"],
+                 locked=b["id"] in locks, window_open=b["id"] == "study", wind=False)
         if s["motion"] != "stopped":
             o["rate"] = 100000 / travel(b, s["motion"]); o["goal"] = s["goal"]
         out["blinds"].append(o)
@@ -83,6 +91,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, dict(network=dict(ssid="HomeWiFi", pass_set=True, hostname="aok-blinds", admin_set=False, mqtt_host="192.168.0.202",
                 mqtt_port=1883, mqtt_user="mqtt", mqtt_pass_set=True, base_topic="aok_blinds", discovery_prefix="homeassistant", **NET),
                 pins=dict(sck=18, miso=19, mosi=23, cs=5, gdo0=12, gdo2=27, led=2, mhz=433.92, pa_dbm=10), remote=remote, blinds=blinds))
+        if u.path == "/api/automation": return self.send(200, dict(AUTO, sunrise=363, sunset=1215, wind=False))
         if u.path == "/api/log":
             after = int(q.get("after", ["0"])[0])
             return self.send(200, dict(seq=len(logs), lines=[l for l in logs if l["seq"] > after]))
@@ -131,6 +140,12 @@ class H(BaseHTTPRequestHandler):
             if a == "cancel": cal["active"] = False
             if a == "clear_history": cal_hist.clear()
             return self.send(200, {"ok": True})
+        if p == "/api/automation":
+            AUTO.update(body)
+            for i, sc in enumerate(AUTO["scenes"]): sc.setdefault("id", sc["name"].lower().replace(" ", "_") or f"scene{i}")
+            REV[0] += 1; return self.send(200, {"ok": True})
+        if p == "/api/lock":
+            (locks.add if body.get("locked") else locks.discard)(body["id"]); return self.send(200, {"ok": True})
         if p == "/api/blinds":
             blinds[:] = body["blinds"]
             for b in blinds:

@@ -16,6 +16,10 @@ Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an 
 - **Follows the hand remote.** When someone uses the remote on the wall, the bridge hears it, and the positions in Home Assistant move to match.
 - **Positions, not just up and down.** Each blind gets a 0–100 % slider. The bridge times the travel and sends Stop at the right moment. Opening and closing have separate travel times.
 - **Groups and all-blinds.** A blind on several channels moves them together in one radio frame. One button moves every blind.
+- **Scenes and schedules on the bridge.** Scenes move several blinds to set positions. Schedules run at a time, at sunrise or at sunset (with an offset), on chosen days, even when Home Assistant is down.
+- **Named positions, locks, windows and wind.** Up to four named positions per blind. Lock a blind so automations leave it alone. A window sensor can stop a blind closing, and a wind sensor retracts awnings.
+- **Safe moves.** Reversing a moving blind stops it first. A blind in an unknown position goes to the nearer end first, then to the %. A start-up delay per blind makes short moves accurate.
+- **Follows more than one remote**, reports long presses, and shows the signal strength of each frame. After three crashes in a row it starts in safe mode, so the page and updates still work.
 - **Shows up in Home Assistant on its own** through MQTT discovery. You get a cover per blind, put in the room you set, plus a remote-button event entity for automations.
 - **Runs from its own web page:**
   - setup Wi-Fi portal

@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.5.0] - 2026-11-17
+
+### Added
+- **Scenes:** move several blinds to set positions in one go (up to 8). Each scene appears in Home Assistant as a scene, on the Blinds tab as a button, and over MQTT at `<base>/scene/set`.
+- **Schedules on the bridge:** at a time, or at sunrise or sunset with an offset, on chosen days, for all blinds, one blind or a scene (up to 12). They keep working when Home Assistant or the internet is down. Set the location for sunrise and sunset; *Use this device's location* fills it in from a phone.
+- **Named positions:** up to four per blind (for example *Privacy 30 %*), as buttons on the blind's menu and in Home Assistant, or `PRESET:<n>` over MQTT.
+- **Lock** per blind (menu, Home Assistant switch, or `LOCK`/`UNLOCK`): Home Assistant, scenes, schedules and *All blinds* leave a locked blind alone. The hand remote and Stop still work.
+- **Window interlock:** `<base>/<blind>/interlock` `ON` from a window or door sensor stops the blind closing (and stops it if it's closing).
+- **Wind protection:** `<base>/wind` `ON` retracts every blind set to *Awning* and holds it there until `OFF`.
+- **Other remotes:** *Add another remote* on the Remote tab follows a second hand remote or wall switch (up to 3), so positions stay right whichever remote is used.
+- **Long presses:** the remote event fires `open_long`, `close_long` or `stop_long` when a button is held for 1.5 s or more.
+- **Signal strength** of every received frame (Activity) and a *Remote signal* sensor in Home Assistant.
+- **Any channels over MQTT:** `<base>/channels/set` with `1,3:OPEN` or `2-5:CLOSE`.
+- **Per-blind availability** in Home Assistant: a blind shows unavailable while the radio isn't working or the remote isn't learned.
+- **Safe mode:** after three crashes in a row the bridge starts without the radio and MQTT, so its page, logs and updates still work. It's back to normal after a restart once fixed.
+- Scenes and schedules are included in the backup.
+
 ## [1.4.0] - 2026-11-17
 
 ### Security

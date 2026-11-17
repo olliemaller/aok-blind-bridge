@@ -237,6 +237,8 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
     <symbol id="i-release" viewBox="0 0 24 24"><path d="M8 12h8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-prog" viewBox="0 0 24 24"><text x="12" y="16.5" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor" font-family="Arial">P</text></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 11V8a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
     <symbol id="i-blind" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.5 7h17M6 10h12M6 13h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   </defs>
 </svg>
@@ -288,6 +290,10 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
             <button class="btn" id="btnCancelLearn" onclick="api('/api/remote',{action:'cancel'})">Cancel</button>
             <button class="btn ghost dng" onclick="forgetRemote()" style="margin-left:auto">Forget remote</button>
           </div>
+          <div class="sep"></div>
+          <p class="small" style="margin-bottom:8px"><b>Other remotes</b> <span class="muted">(a second hand remote or a wall switch): the bridge follows their presses too, so positions stay right.</span></p>
+          <div id="extraRemotes" class="small muted" style="margin-bottom:10px"></div>
+          <div class="btns"><button class="btn" onclick="api('/api/remote',{action:'learn_extra'})">Add another remote</button><button class="btn ghost dng" onclick="if(confirm('Stop following the other remotes?'))api('/api/remote',{action:'forget_extra'})">Remove others</button></div>
         </div>
       </div>
       <div class="card">
@@ -331,6 +337,50 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
       <span class="muted small">A blind on more than one channel is a group: one command moves them all.</span>
     </div>
   </div>
+</section>
+
+<!-- ============ SCENES & SCHEDULES ============ -->
+<section id="s-auto">
+  <div class="cols">
+    <div class="stack">
+      <div class="card">
+        <div class="hd"><h2>Scenes</h2><span class="sp"><button class="btn sm" onclick="addScene()"><svg class="ic"><use href="#i-plus"/></svg>Add scene</button></span></div>
+        <div class="bd">
+          <p class="muted small" style="margin-bottom:12px">A scene moves several blinds to set positions in one go, for example <i>Movie</i> or <i>Morning</i>. Each scene also shows up in Home Assistant.</p>
+          <div id="sceneList" class="stack"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="hd"><h2>Location</h2><span class="sp" id="sunTag"></span></div>
+        <div class="bd">
+          <p class="muted small" style="margin-bottom:12px">Needed for schedules at sunrise or sunset. Only the bridge uses it.</p>
+          <div class="grid3">
+            <label class="field"><span>Latitude</span><input type="number" step="0.0001" id="a_lat" placeholder="-37.81" oninput="autoDirty()"></label>
+            <label class="field"><span>Longitude</span><input type="number" step="0.0001" id="a_lon" placeholder="144.96" oninput="autoDirty()"></label>
+            <label class="field"><span>&nbsp;</span><button class="btn" onclick="useMyLocation()">Use this device's location</button></label>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="card">
+        <div class="hd"><h2>Schedules</h2><span class="sp"><button class="btn sm" onclick="addSched()"><svg class="ic"><use href="#i-plus"/></svg>Add schedule</button></span></div>
+        <div class="bd">
+          <p class="muted small" style="margin-bottom:12px">Schedules run on the bridge itself, so they still work when Home Assistant or the internet is down. Locked blinds are skipped.</p>
+          <div id="schedList" class="stack"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="hd"><h2>Locks, windows and wind</h2></div>
+        <div class="bd small">
+          <p style="margin-bottom:8px"><b>Lock</b> a blind from its <b>⋯</b> menu or its <i>Lock</i> switch in Home Assistant. Home Assistant, scenes and schedules then leave it alone. The hand remote and Stop still work.</p>
+          <p style="margin-bottom:8px"><b>Window open:</b> publish <code id="tInterlock"></code> <code>ON</code> from a door or window sensor automation and that blind won't close (it stops if it's closing). <code>OFF</code> when it's shut.</p>
+          <p><b>Wind:</b> publish <code id="tWind"></code> <code>ON</code> from a wind sensor and every blind set to <i>Awning</i> retracts and stays put until <code>OFF</code>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="savebar show" id="autoBar" style="position:static;margin-top:14px;display:none"><span class="muted small">Unsaved changes</span><span class="sp"></span><button class="btn" onclick="loadAuto()">Discard</button><button class="btn pri" onclick="saveAuto()">Save</button></div>
 </section>
 
 <!-- ============ CALIBRATE ============ -->
@@ -502,7 +552,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icon=(n,cls='ic')=>`<svg class="${cls}"><use href="#i-${n}"/></svg>`;
-const TABS=[['blinds','Blinds'],['remote','Remote'],['setup','Set up blinds'],['cal','Calibrate'],['activity','Activity'],['logs','Logs'],['settings','Settings']];
+const TABS=[['blinds','Blinds'],['remote','Remote'],['setup','Set up blinds'],['auto','Scenes & schedules'],['cal','Calibrate'],['activity','Activity'],['logs','Logs'],['settings','Settings']];
 const openEd=new Set();let edKey=0;
 const UPDATE_MANIFEST='https://olliemaller.github.io/aok-blind-bridge/firmware/manifest.json';
 const TZS=[['Australia/Sydney','AEST-10AEDT,M10.1.0,M4.1.0/3'],['Australia/Melbourne','AEST-10AEDT,M10.1.0,M4.1.0/3'],['Australia/Hobart','AEST-10AEDT,M10.1.0,M4.1.0/3'],['Australia/Brisbane','AEST-10'],['Australia/Adelaide','ACST-9:30ACDT,M10.1.0,M4.1.0/3'],['Australia/Darwin','ACST-9:30'],['Australia/Perth','AWST-8'],['Pacific/Auckland','NZST-12NZDT,M9.5.0,M4.1.0/3'],['Asia/Tokyo','JST-9'],['Asia/Singapore','<+08>-8'],['Asia/Hong_Kong','HKT-8'],['Asia/Kolkata','IST-5:30'],['Asia/Dubai','<+04>-4'],['Africa/Johannesburg','SAST-2'],['Europe/London','GMT0BST,M3.5.0/1,M10.5.0'],['Europe/Dublin','IST-1GMT0,M10.5.0,M3.5.0/1'],['Europe/Paris','CET-1CEST,M3.5.0,M10.5.0/3'],['Europe/Berlin','CET-1CEST,M3.5.0,M10.5.0/3'],['Europe/Amsterdam','CET-1CEST,M3.5.0,M10.5.0/3'],['Europe/Athens','EET-2EEST,M3.5.0/3,M10.5.0/4'],['America/New_York','EST5EDT,M3.2.0,M11.1.0'],['America/Toronto','EST5EDT,M3.2.0,M11.1.0'],['America/Chicago','CST6CDT,M3.2.0,M11.1.0'],['America/Denver','MST7MDT,M3.2.0,M11.1.0'],['America/Phoenix','MST7'],['America/Los_Angeles','PST8PDT,M3.2.0,M11.1.0'],['America/Vancouver','PST8PDT,M3.2.0,M11.1.0'],['UTC','UTC0']];
@@ -542,6 +592,7 @@ function go(t,anchor){
   drawNav();
   if(t=='setup'||t=='settings'||t=='cal')loadConfig();
   if(t=='logs')pollLog(true);
+  if(t=='auto')loadAuto();
   if(t=='settings'&&S&&S.wifi.ap&&!$('scanSel').dataset.done){$('scanSel').dataset.done=1;scan()}
   if(t=='settings'&&S&&S.wifi.connected&&!S.mqtt.configured&&!brokerSearched)findBroker(true);
   if(anchor)setTimeout(()=>$(anchor).scrollIntoView({behavior:'smooth',block:'start'}),60);
@@ -630,7 +681,9 @@ function pill(id,cls,label){const e=$(id);e.className='pill '+cls;e.querySelecto
 let blindSig='';
 function drawBlinds(){
   const al=[];
-  if(!S.radio.ready)al.push(banner('bad','alert','<b>The radio isn\'t responding.</b> Check the CC1101 wiring.','Wiring',"go('settings','set-radio')"));
+  if(S.safe_mode)al.push(banner('bad','alert','<b>Safe mode.</b> The bridge crashed three times in a row, so the radio and Home Assistant are off. Check the settings and logs, update the firmware, then restart.','Logs',"go('logs')"));
+  if(S.wind)al.push(banner('warn','alert','<b>Wind alarm.</b> Awnings are retracted and held until the wind drops.'));
+  if(!S.radio.ready&&!S.safe_mode)al.push(banner('bad','alert','<b>The radio isn\'t responding.</b> Check the CC1101 wiring.','Wiring',"go('settings','set-radio')"));
   if(!S.remote.complete)al.push(banner('warn','remote','<b>Learn your remote first.</b> The bridge copies it to control the blinds.','Learn remote',"go('remote')"));
   if(C&&C.network&&!C.network.admin_set&&!(S.wifi&&S.wifi.ap))al.push(banner('warn','alert','<b>No admin password.</b> Anyone on your network can open this page, move the blinds and change the settings. Over-the-air updates from PlatformIO stay off until you set one.','Set password',"go('settings')"));
   $('blindAlerts').innerHTML=al.join('');
@@ -639,8 +692,9 @@ function drawBlinds(){
     <button class="btn sm" onclick="cmd('all','OPEN')">${icon('up')}Open all</button>
     <button class="btn sm" onclick="cmd('all','STOP')">${icon('stop')}Stop</button>
     <button class="btn sm" onclick="cmd('all','CLOSE')">${icon('down')}Close all</button></div>`:'';
+  $('allBar').innerHTML+=(S.scenes||[]).length?`<div class="card allbar"><b>Scenes</b>${S.scenes.map(x=>`<button class="btn sm" onclick="runScene('${x.id}')">${icon('blind')}${esc(x.name)}</button>`).join('')}</div>`:'';
   if(!S.blinds.length){blindSig='';list.innerHTML=`<div class="card empty" style="grid-column:1/-1">${icon('blind','')}<p><b>No blinds yet</b></p><p class="small" style="margin:4px 0 14px">Add a blind for each channel on your remote.</p><button class="btn pri" onclick="go('setup')">Set up blinds</button></div>`;return}
-  const sig=S.blinds.map(b=>[b.id,b.name,b.channels,b.favourite,b.group,b.room].join('|')).join(';');
+  const sig=S.blinds.map(b=>[b.id,b.name,b.channels,b.favourite,b.group,b.room,b.locked,b.window_open,b.wind,JSON.stringify(b.presets||[])].join('|')).join(';');
   if(sig!==blindSig){blindSig=sig;
     const rooms=[...new Set(S.blinds.map(b=>b.room||''))];
     const named=rooms.some(r=>r);
@@ -656,7 +710,7 @@ function blindCard(b){
       <rect class="rail" x="5" y="7" width="48" height="2.4" rx="1"/>
       <rect class="head" x="1.5" y="2" width="55" height="5" rx="1.5"/>
     </svg>
-    <div class="bname"><b title="${esc(b.name)}">${esc(b.name)}</b>${b.group?'<span class="tag">Group</span>':''}<span class="tag" title="Remote channel">Ch ${esc(b.channels)}</span></div>
+    <div class="bname"><b title="${esc(b.name)}">${esc(b.name)}</b>${b.group?'<span class="tag">Group</span>':''}<span class="tag" title="Remote channel">Ch ${esc(b.channels)}</span>${b.locked?`<span class="tag warn" title="Locked: Home Assistant, scenes and schedules leave it alone">${icon('lock')}Locked</span>`:''}${b.window_open?'<span class="tag warn" title="The window is open: it won\'t close">Window open</span>':''}${b.wind?'<span class="tag warn">Wind</span>':''}</div>
     <div class="bstate"><span class="st"></span></div>
     <div class="bctl">
       <button class="round" title="Up" aria-label="Open ${esc(b.name)}" onclick="cmd('${b.id}','OPEN')">${icon('up')}</button>
@@ -666,6 +720,8 @@ function blindCard(b){
       ${b.favourite>=0?`<button class="round fav" title="Favourite (${b.favourite}%)" aria-label="Favourite position" onclick="cmd('${b.id}','FAVOURITE')">${icon('star')}</button>`:''}
       <div class="more"><button class="round" title="More" aria-label="More options" onclick="toggleMenu('${b.id}',event)">${icon('more')}</button>
         <div class="menu" id="m-${b.id}">
+          ${(b.presets||[]).map((x,k)=>`<button onclick="cmd('${b.id}','PRESET:${k+1}')">${icon('blind')}${esc(x.name)} (${x.position}%)</button>`).join('')}
+          <button onclick="setLock('${b.id}',${!b.locked})">${icon('lock')}${b.locked?'Unlock':'Lock'}</button>
           <button onclick="cmd('${b.id}','SYNC_OPEN')">${icon('up')}Mark as fully open</button>
           <button onclick="cmd('${b.id}','SYNC_CLOSE')">${icon('down')}Mark as fully closed</button>
           <button onclick="go('cal');setTimeout(()=>{$('calBlind').value='${b.id}';drawCal()},50)">${icon('dot')}Calibrate</button>
@@ -713,6 +769,7 @@ function drawRemote(){
   $('btnLearn').textContent=r.complete?'Learn again':'Start learning';
   $('btnLearn').disabled=r.learning;$('btnCancelLearn').style.display=r.learning?'':'none';
   if(document.activeElement!==$('listen'))$('listen').checked=r.listen;
+  $('extraRemotes').innerHTML=(r.extra||[]).length?r.extra.map(x=>`Remote ${esc(x.remote_id)}`).join(' · '):'None yet.';
   // channel map
   const seen=chList(r.seen),used={};
   S.blinds.forEach(b=>chList(b.channels).forEach(c=>(used[c]=used[c]||[]).push(b.name)));
@@ -754,6 +811,8 @@ function drawEditors(){
       <label class="field"><span>Start-up delay (s)</span><input type="number" step="0.1" min="0" max="3" placeholder="0" value="${b.start_ms?secs(b.start_ms):''}" oninput="edit[${i}].start_ms=Math.round((parseFloat(this.value)||0)*1000);markDirty()"><small>How long the motor takes to start after a command. Makes short moves land closer to the target.</small></label>
       <label class="field"><span>Favourite position (%)</span><input type="number" min="0" max="100" placeholder="None" value="${b.favourite>=0?b.favourite:''}" oninput="edit[${i}].favourite=this.value===''?-1:Math.max(0,Math.min(100,parseInt(this.value)||0));markDirty()"></label>
     </div>
+    <span class="lab" style="margin-top:6px">Named positions <span class="faint">(buttons here and in Home Assistant)</span></span>
+    <div class="grid3">${[0,1,2,3].map(k=>{const x=(b.presets||[])[k]||{};return `<label class="field"><span>Name</span><input type="text" value="${esc(x.name||'')}" placeholder="e.g. Privacy" oninput="setPreset(${i},${k},'name',this.value)"></label><label class="field"><span>Position (%)</span><input type="number" min="0" max="100" value="${x.position!=null?x.position:''}" placeholder="–" oninput="setPreset(${i},${k},'position',this.value)"></label>${k%1==0?'<span></span>':''}`}).join('')}</div>
     <div class="btns">
       <label class="field" style="margin:0;min-width:150px"><span>Type in Home Assistant</span><select onchange="edit[${i}].device_class=this.value;markDirty()">${['shade','blind','curtain','awning','shutter'].map(t=>`<option value="${t}" ${t==b.device_class?'selected':''}>${cap(t)}</option>`).join('')}</select></label>
       <label class="switch" style="margin-top:18px"><input type="checkbox" ${b.invert?'checked':''} onchange="edit[${i}].invert=this.checked;markDirty()"><span class="small">Reversed <span class="faint">(Up closes it)</span></span></label>
@@ -767,6 +826,62 @@ function drawEditors(){
   const rl=[...new Set(edit.map(b=>b.room).filter(Boolean))];
   $('roomList').innerHTML=rl.map(r=>`<option value="${esc(r)}">`).join('');
   if(S)drawSetupAlerts();
+}
+function setPreset(i,k,f,v){const b=edit[i];b.presets=[0,1,2,3].map(n=>({...((b.presets||[])[n]||{})}));const x=b.presets[k];
+  if(f=='position')x.position=v===''?null:Math.max(0,Math.min(100,parseInt(v)||0));else x.name=v;
+  markDirty()}
+function setLock(id,on){api('/api/lock',{id,locked:on})}
+function runScene(id){api('/api/scene',{id})}
+
+/* scenes & schedules */
+let A=null,autoChanged=false;
+const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const hm=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+function autoDirty(){autoChanged=true;$('autoBar').style.display='flex'}
+async function loadAuto(){
+  try{const r=await fetch('/api/automation',{cache:'no-store'});if(!r.ok)return;A=await r.json()}catch(e){return}
+  autoChanged=false;$('autoBar').style.display='none';
+  $('a_lat').value=A.latitude!=null?A.latitude:'';$('a_lon').value=A.longitude!=null?A.longitude:'';
+  $('sunTag').innerHTML=A.sunrise!=null&&A.sunrise>=0?`<span class="tag">Sunrise ${hm(A.sunrise)} · Sunset ${hm(A.sunset)}</span>`:'';
+  const base=(C&&C.network&&C.network.base_topic)||'aok_blinds';
+  $('tInterlock').textContent=base+'/<blind>/interlock';$('tWind').textContent=base+'/wind';
+  drawAuto();
+}
+function drawAuto(){
+  if(!A||!S)return;
+  const blinds=S.blinds;
+  $('sceneList').innerHTML=A.scenes.length?A.scenes.map((sc,i)=>`<div class="card ed open" style="box-shadow:none;border:1px solid var(--line)"><div class="edb" style="display:block">
+    <div class="row1"><input type="text" value="${esc(sc.name)}" placeholder="Scene name, e.g. Movie" oninput="A.scenes[${i}].name=this.value;autoDirty()">
+      <button class="btn sm" onclick="runScene('${esc(sc.id||'')}')" ${sc.id?'':'disabled title="Save first"'}>Run</button>
+      <button class="btn ghost dng sm" onclick="A.scenes.splice(${i},1);autoDirty();drawAuto()">${icon('x')}</button></div>
+    <div class="grid3" style="margin-top:10px">${blinds.map(b=>{const it=sc.blinds.find(x=>x.id==b.id);return `<label class="field"><span><input type="checkbox" ${it?'checked':''} onchange="sceneBlind(${i},'${b.id}',this.checked)"> ${esc(b.name)}</span><input type="number" min="0" max="100" value="${it?it.position:''}" placeholder="%" ${it?'':'disabled'} oninput="sceneBlind(${i},'${b.id}',true,this.value)"></label>`}).join('')}</div>
+  </div></div>`).join(''):'<p class="faint small">No scenes yet.</p>';
+  const targets=[['all','All blinds'],...blinds.map(b=>[b.id,b.name]),...A.scenes.filter(x=>x.id).map(x=>['scene:'+x.id,'Scene: '+x.name])];
+  $('schedList').innerHTML=A.schedules.length?A.schedules.map((s,i)=>{const pos=!['OPEN','CLOSE','STOP'].includes(s.action);return `<div class="card" style="box-shadow:none;border:1px solid var(--line);padding:12px">
+    <div class="btns" style="margin-bottom:8px"><label class="switch"><input type="checkbox" ${s.enabled?'checked':''} onchange="A.schedules[${i}].enabled=this.checked;autoDirty()"><span></span></label>
+      ${DAYS.map((d,k)=>`<button class="chan ${s.days&(1<<k)?'on':''}" onclick="A.schedules[${i}].days^=${1<<k};autoDirty();drawAuto()">${d}</button>`).join('')}
+      <button class="btn ghost dng sm" style="margin-left:auto" onclick="A.schedules.splice(${i},1);autoDirty();drawAuto()">${icon('x')}</button></div>
+    <div class="grid3">
+      <label class="field"><span>When</span><select onchange="A.schedules[${i}].when=this.value;A.schedules[${i}].minutes=this.value=='time'?420:0;autoDirty();drawAuto()">${[['time','At a time'],['sunrise','Sunrise'],['sunset','Sunset']].map(([v,l])=>`<option value="${v}" ${v==s.when?'selected':''}>${l}</option>`).join('')}</select></label>
+      ${s.when=='time'?`<label class="field"><span>Time</span><input type="time" value="${hm(s.minutes)}" onchange="const[h,m]=this.value.split(':');A.schedules[${i}].minutes=h*60+ +m;autoDirty()"></label>`
+        :`<label class="field"><span>Minutes after (− before)</span><input type="number" min="-240" max="240" value="${s.minutes}" oninput="A.schedules[${i}].minutes=parseInt(this.value)||0;autoDirty()"></label>`}
+      <label class="field"><span>Blinds</span><select onchange="A.schedules[${i}].target=this.value;autoDirty();drawAuto()">${targets.map(([v,l])=>`<option value="${esc(v)}" ${v==s.target?'selected':''}>${esc(l)}</option>`).join('')}</select></label>
+      ${s.target.startsWith('scene:')?'':`<label class="field"><span>Do</span><select onchange="A.schedules[${i}].action=this.value=='POS'?'50':this.value;autoDirty();drawAuto()">${[['OPEN','Open'],['CLOSE','Close'],['STOP','Stop'],['POS','Go to a position']].map(([v,l])=>`<option value="${v}" ${(v=='POS'?pos:v==s.action)?'selected':''}>${l}</option>`).join('')}</select></label>
+      ${pos?`<label class="field"><span>Position (%)</span><input type="number" min="0" max="100" value="${s.action}" oninput="A.schedules[${i}].action=String(Math.max(0,Math.min(100,parseInt(this.value)||0)));autoDirty()"></label>`:''}`}
+    </div></div>`}).join(''):'<p class="faint small">No schedules yet.</p>';
+}
+function sceneBlind(i,id,on,v){const sc=A.scenes[i];const it=sc.blinds.find(x=>x.id==id);
+  if(!on){sc.blinds=sc.blinds.filter(x=>x.id!=id)}else if(it){if(v!==undefined)it.position=Math.max(0,Math.min(100,parseInt(v)||0))}else{const b=S.blinds.find(x=>x.id==id);sc.blinds.push({id,position:b&&b.position>=0?b.position:50})}
+  autoDirty();if(v===undefined)drawAuto()}
+function addScene(){if(!A)return;if(A.scenes.length>=8)return toast('Up to 8 scenes',true);A.scenes.push({name:'Scene '+(A.scenes.length+1),blinds:S.blinds.map(b=>({id:b.id,position:b.position>=0?b.position:50}))});autoDirty();drawAuto()}
+function addSched(){if(!A)return;if(A.schedules.length>=12)return toast('Up to 12 schedules',true);A.schedules.push({enabled:true,days:127,when:'time',minutes:420,target:'all',action:'OPEN'});autoDirty();drawAuto()}
+function useMyLocation(){if(!navigator.geolocation)return toast('This browser can\'t share its location',true);
+  navigator.geolocation.getCurrentPosition(p=>{$('a_lat').value=p.coords.latitude.toFixed(4);$('a_lon').value=p.coords.longitude.toFixed(4);autoDirty()},()=>toast('Location not available: type it in',true))}
+async function saveAuto(){
+  const lat=parseFloat($('a_lat').value),lon=parseFloat($('a_lon').value);
+  const body={scenes:A.scenes,schedules:A.schedules};
+  if(!isNaN(lat)&&!isNaN(lon)){body.latitude=lat;body.longitude=lon}
+  const j=await api('/api/automation',body);if(j){toast('Scenes and schedules saved');loadAuto()}
 }
 function toggleCh(i,c){const l=chList(edit[i].channels).filter(x=>x!=c);if(!chList(edit[i].channels).includes(c))l.push(c);edit[i].channels=l.sort((a,b)=>a-b).join(',');markDirty();drawEditors()}
 function testRow(i,a){const ch=edit[i].channels;if(!ch)return toast('Choose a channel first',true);api('/api/test',{channels:ch,action:a})}
@@ -789,7 +904,7 @@ function addMissing(){
 }
 async function saveBlinds(){
   for(const b of edit){if(!b.name.trim())return toast('Every blind needs a name',true);if(!chList(b.channels).length)return toast(`${b.name}: choose a channel`,true)}
-  const j=await api('/api/blinds',{blinds:edit.map(({_k,...b})=>b)});
+  const j=await api('/api/blinds',{blinds:edit.map(({_k,...b})=>({...b,presets:(b.presets||[]).filter(x=>x&&x.position!=null&&x.position!=='')}))});
   if(j){dirty=false;$('savebar').classList.remove('show');toast('Blinds saved');blindSig='';loadConfig()}
 }
 window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue=''}});

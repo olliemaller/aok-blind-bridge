@@ -16,6 +16,8 @@
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <Update.h>
+#include <math.h>
+#include "aok_sun.h"
 #include <WebServer.h>
 #include <WiFi.h>
 #include <time.h>
@@ -24,7 +26,7 @@
 #include "aok_protocol.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.4.0"
+#define FW_VERSION "1.5.0"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -84,6 +86,11 @@ struct RemoteCfg {
   aok::Timings timings;
   bool listen = true;
   uint16_t seen = 0;  // channels this remote has been heard on
+  // Other remotes the bridge follows (a second hand remote, a wall switch): their
+  // presses move the blinds' positions here too. Up to 3.
+  uint32_t extraPrefix[3] = {0, 0, 0};
+  uint8_t extraId[3] = {0, 0, 0};
+  uint8_t extraCount = 0;
 };
 
 struct BlindCfg {
@@ -92,6 +99,8 @@ struct BlindCfg {
   uint32_t openMs = 30000, closeMs = 30000;
   uint16_t startMs = 0;  // motor start-up lag: time between the radio frame and the blind actually moving
   bool invert = false;
+  String presetName[4];             // named positions ("Half", "Privacy"...)
+  int presetPos[4] = {-1, -1, -1, -1};
   int favourite = -1;
 };
 
@@ -103,6 +112,9 @@ struct BlindState {
   uint32_t startMs = 0, durMs = 0;
   bool autoStop = false;
   int after = -1;              // after an endpoint run, go on to this position (reference run)
+  bool locked = false;         // Home Assistant, scenes, schedules and the page leave it alone (Stop still works)
+  bool interlock = false;      // window/door open (from Home Assistant): it won't close
+  bool windLocked = false;     // an awning retracted for wind: locked until the wind drops
   int pending = -1;            // reverse requested while moving: go here once the motor has stopped
   uint32_t pendingAtMs = 0;
   uint32_t lastPublishMs = 0;
@@ -115,7 +127,29 @@ struct HeardFrame {
   aok::Frame f;
   bool matched = false;
   uint16_t repeats = 1;
+  int16_t rssi = 0;  // signal strength of the frame, dBm
 };
+
+// ---- automation: scenes and schedules (saved together as "auto")
+constexpr size_t kMaxScenes = 8, kMaxSceneItems = 16, kMaxSchedules = 12;
+struct SceneItem { String id; int position = 0; };
+struct Scene { String id, name; SceneItem items[kMaxSceneItems]; uint8_t count = 0; };
+enum class When : uint8_t { Time, Sunrise, Sunset };
+struct Schedule {
+  bool enabled = true;
+  uint8_t days = 0x7F;         // bit 0 = Monday .. bit 6 = Sunday
+  When when = When::Time;
+  int16_t minutes = 0;         // time of day for Time; offset (+/-) for Sunrise/Sunset
+  String target = "all";       // "all", a blind id, or "scene:<id>"
+  String action = "OPEN";      // OPEN, CLOSE, STOP or a position 0-100
+  int lastDay = -1;            // day of year it last ran, so it runs once a day
+};
+Scene scenes[kMaxScenes];
+size_t sceneCount = 0;
+Schedule schedules[kMaxSchedules];
+size_t scheduleCount = 0;
+float siteLat = NAN, siteLon = NAN;
+bool windActive = false;       // set over MQTT by a wind sensor automation
 
 Pins pins;
 NetCfg net;
@@ -133,6 +167,15 @@ PubSubClient mqtt(wifiClient);
 bool radioReady = false, apMode = false, otaReady = false, mdnsReady = false;
 bool learnMode = false, rebootPending = false, discoveryPending = true;
 bool learnLocked = false;            // a learn session sticks to the first remote it hears
+bool learnExtra = false;             // this learn session adds a second remote instead
+bool safeMode = false;               // crashed 3 times in a row: radio and MQTT stay off
+RTC_NOINIT_ATTR uint32_t crashMagic;
+RTC_NOINIT_ATTR uint32_t crashCount;
+int16_t lastRssi = 0;                // signal strength of the last frame from our remotes
+bool pressActive = false;            // a hand-remote button is being held
+uint32_t pressStartMs = 0;
+aok::Action pressAction = aok::Action::Unknown;
+int lastScheduleMinute = -1;
 uint32_t learnPrefix = 0;
 uint8_t learnRemoteId = 0;
 uint32_t stateRev = 1;               // bumps when frames, calibration history or config change (page refetches)
@@ -175,6 +218,11 @@ aok::Decoder decoder;
 // ---------------------------------------------------------------- helpers
 bool anyMoving();
 void sendError(const String& msg, int code);
+bool runScene(const String& key, const String& source, String& err);
+void setLock(size_t i, bool locked, bool save = true);
+bool channelCommand(const String& payload, const String& source, String& err);
+void setWind(bool on);
+bool remoteKnown(uint32_t prefix, uint8_t id);
 int clampPos(int v) { return v < 0 ? 0 : (v > 100 ? 100 : v); }
 
 String hex(uint64_t v, int digits) {
@@ -292,6 +340,11 @@ void remoteToJson(JsonObject o) {
   o["stop"] = remote.have[2] ? hex(remote.base[2], 4) : "";
   o["listen"] = remote.listen;
   o["seen"] = maskText(remote.seen);
+  JsonArray ex = o["extra"].to<JsonArray>();
+  for (uint8_t k = 0; k < remote.extraCount; ++k) {
+    JsonObject x = ex.add<JsonObject>();
+    x["prefix"] = hex(remote.extraPrefix[k], 6); x["remote_id"] = hex(remote.extraId[k], 2);
+  }
   JsonObject t = o["timings"].to<JsonObject>();
   t["short"] = remote.timings.shortUs; t["long"] = remote.timings.longUs;
   t["sync_high"] = remote.timings.syncHighUs; t["sync_low"] = remote.timings.syncLowUs;
@@ -310,6 +363,15 @@ void remoteFromJson(JsonObjectConst o) {
   }
   if (o["listen"].is<bool>()) remote.listen = o["listen"];
   if (o["seen"].is<const char*>()) remote.seen = parseChannels(o["seen"].as<String>());
+  if (o["extra"].is<JsonArrayConst>()) {
+    remote.extraCount = 0;
+    for (JsonObjectConst x : o["extra"].as<JsonArrayConst>()) {
+      if (remote.extraCount >= 3) break;
+      remote.extraPrefix[remote.extraCount] = parseHex(x["prefix"] | "0") & 0xFFFFFF;
+      remote.extraId[remote.extraCount] = parseHex(x["remote_id"] | "0") & 0xFF;
+      remote.extraCount++;
+    }
+  }
   JsonObjectConst t = o["timings"];
   if (!t.isNull()) {
     remote.timings.shortUs = t["short"] | remote.timings.shortUs;
@@ -336,6 +398,12 @@ void blindToJson(size_t i, JsonObject o) {
   o["id"] = cfg[i].id; o["name"] = cfg[i].name; o["channels"] = maskText(cfg[i].mask);
   o["open_ms"] = cfg[i].openMs; o["close_ms"] = cfg[i].closeMs; o["invert"] = cfg[i].invert;
   o["start_ms"] = cfg[i].startMs;
+  JsonArray pr = o["presets"].to<JsonArray>();
+  for (int k = 0; k < 4; ++k) {
+    if (cfg[i].presetPos[k] < 0) continue;
+    JsonObject x = pr.add<JsonObject>();
+    x["name"] = cfg[i].presetName[k]; x["position"] = cfg[i].presetPos[k];
+  }
   o["favourite"] = cfg[i].favourite; o["device_class"] = cfg[i].deviceClass; o["room"] = cfg[i].room;
 }
 
@@ -368,6 +436,16 @@ bool blindsFromJson(JsonArrayConst arr, String& err) {
     b.closeMs = constrain(static_cast<uint32_t>(o["close_ms"] | 30000), 1000u, 300000u);
     b.invert = o["invert"] | false;
     b.startMs = constrain(static_cast<int>(o["start_ms"] | 0), 0, 3000);
+    int k = 0;
+    for (JsonObjectConst x : o["presets"].as<JsonArrayConst>()) {
+      if (k >= 4) break;
+      const int pos = x["position"] | -1;
+      if (pos < 0 || pos > 100) continue;
+      b.presetName[k] = x["name"] | "";
+      b.presetName[k].trim();
+      if (!b.presetName[k].length()) b.presetName[k] = String(pos) + "%";
+      b.presetPos[k++] = pos;
+    }
     b.favourite = o["favourite"] | -1;
     if (b.favourite > 100) b.favourite = 100;
     b.deviceClass = o["device_class"] | "shade";
@@ -605,6 +683,10 @@ bool stopBlind(size_t i, const String& source, String& err);
 
 bool moveTo(size_t i, int target, const String& source, String& err) {
   target = clampPos(target);
+  if (st[i].interlock && source != "wind") {
+    const int now = estimate(i);
+    if (now < 0 || target < now) { err = "the window or door is open: it won't close until it's shut"; return false; }
+  }
   int gp; Motion gm;
   if (__builtin_popcount(cfg[i].mask) > 1 && groupPosition(i, gp, gm) && gm == Motion::Stopped && st[i].motion == Motion::Stopped) {
     st[i].position = st[i].startPos = gp;  // a group starts from where its members actually are
@@ -716,6 +798,10 @@ void publishDiscovery() {
       d["position_open"] = 100; d["position_closed"] = 0;
       d["optimistic"] = false;
       d["device_class"] = cfg[i].deviceClass;
+      JsonArray av = d["availability"].to<JsonArray>();
+      av.add<JsonObject>()["topic"] = topic("status");
+      av.add<JsonObject>()["topic"] = blindTopic(i, "available");
+      d["availability_mode"] = "all";
       deviceJson(d.as<JsonObject>());
       // each blind is its own device so it can sit in its own area
       JsonObject dev = d["device"];
@@ -745,8 +831,51 @@ void publishDiscovery() {
       dev["identifiers"][0] = uid; dev["name"] = cfg[i].name; dev["via_device"] = nodeId();
       publishJson(t, d);
     }
+    {  // lock switch: Home Assistant, scenes and schedules leave a locked blind alone
+      JsonDocument d;
+      const String luid = uid + "_lock";
+      d["name"] = "Lock"; d["unique_id"] = luid; d["icon"] = "mdi:lock";
+      d["command_topic"] = blindTopic(i, "lock/set"); d["state_topic"] = blindTopic(i, "lock");
+      d["payload_on"] = "ON"; d["payload_off"] = "OFF"; d["entity_category"] = "config";
+      deviceJson(d.as<JsonObject>());
+      JsonObject dev = d["device"];
+      dev["identifiers"][0] = uid; dev["name"] = cfg[i].name; dev["via_device"] = nodeId();
+      publishJson(disc + "/switch/" + luid + "/config", d);
+    }
+    for (int k = 0; k < 4; ++k) {  // one button per named position
+      const String puid = uid + "_preset" + String(k + 1);
+      const String t = disc + "/button/" + puid + "/config";
+      if (cfg[i].presetPos[k] < 0) { mqtt.publish(t.c_str(), "", true); continue; }
+      JsonDocument d;
+      d["name"] = cfg[i].presetName[k]; d["unique_id"] = puid; d["icon"] = "mdi:blinds-horizontal";
+      d["command_topic"] = blindTopic(i, "set"); d["payload_press"] = String("PRESET:") + String(k + 1);
+      deviceJson(d.as<JsonObject>());
+      JsonObject dev = d["device"];
+      dev["identifiers"][0] = uid; dev["name"] = cfg[i].name; dev["via_device"] = nodeId();
+      publishJson(t, d);
+    }
     ids.add(cfg[i].id);
   }
+  // scenes: one Home Assistant scene each
+  JsonDocument sceneIds;
+  for (size_t k = 0; k < sceneCount; ++k) {
+    JsonDocument d;
+    const String suid = nodeId() + "_scene_" + scenes[k].id;
+    d["name"] = scenes[k].name; d["unique_id"] = suid; d["icon"] = "mdi:blinds";
+    d["command_topic"] = topic("scene/set"); d["payload_on"] = scenes[k].id;
+    deviceJson(d.as<JsonObject>());
+    publishJson(disc + "/scene/" + suid + "/config", d);
+    sceneIds.add(scenes[k].id);
+  }
+  JsonDocument oldScenes;
+  if (!deserializeJson(oldScenes, prefs.getString("pubscenes", "[]"))) {
+    for (JsonVariantConst v : oldScenes.as<JsonArrayConst>()) {
+      bool still = false;
+      for (size_t k = 0; k < sceneCount; ++k) still |= scenes[k].id == v.as<String>();
+      if (!still) mqtt.publish((disc + "/scene/" + nodeId() + "_scene_" + v.as<String>() + "/config").c_str(), "", true);
+    }
+  }
+  { String ss; serializeJson(sceneIds, ss); prefs.putString("pubscenes", ss); }
   // remove entities for blinds that were deleted
   JsonDocument old;
   if (!deserializeJson(old, prefs.getString("pubids", "[]"))) {
@@ -755,8 +884,9 @@ void publishDiscovery() {
       if (findBlind(id) >= 0) continue;
       const String uid = nodeId() + "_" + id;
       mqtt.publish((disc + "/cover/" + uid + "/config").c_str(), "", true);
-      for (const char* k : {"favourite", "mark_open", "mark_closed"})
+      for (const char* k : {"favourite", "mark_open", "mark_closed", "preset1", "preset2", "preset3", "preset4"})
         mqtt.publish((disc + "/button/" + uid + "_" + k + "/config").c_str(), "", true);
+      mqtt.publish((disc + "/switch/" + uid + "_lock/config").c_str(), "", true);
       for (const char* s : {"state", "position", "attributes", "set", "set_position"})
         mqtt.publish((net.base + "/" + id + "/" + s).c_str(), "", true);
     }
@@ -778,6 +908,7 @@ void publishDiscovery() {
   sensor("uptime", "Uptime", "s", "duration", nullptr, true);
   sensor("ip", "IP address", nullptr, nullptr, "mdi:ip-network", true);
   sensor("last_remote", "Last remote press", nullptr, nullptr, "mdi:remote", false);
+  sensor("radio_rssi", "Remote signal", "dBm", "signal_strength", nullptr, true);
   {
     JsonDocument d;
     d["name"] = "CC1101 radio"; d["unique_id"] = nodeId() + "_radio"; d["state_topic"] = topic("diag/radio");
@@ -790,6 +921,7 @@ void publishDiscovery() {
     d["name"] = "Remote button"; d["unique_id"] = nodeId() + "_remote_event"; d["state_topic"] = topic("remote/event");
     JsonArray et = d["event_types"].to<JsonArray>();
     et.add("open"); et.add("close"); et.add("stop");
+    et.add("open_long"); et.add("close_long"); et.add("stop_long");
     d["icon"] = "mdi:remote";
     deviceJson(d.as<JsonObject>());
     publishJson(disc + "/event/" + nodeId() + "_remote_event/config", d);
@@ -820,6 +952,13 @@ void publishBlind(size_t i) {
   d["close_time_s"] = cfg[i].closeMs / 1000.0;
   d["favourite_position"] = cfg[i].favourite;
   d["inverted"] = cfg[i].invert;
+  d["locked"] = st[i].locked;
+  d["window_open"] = st[i].interlock;
+  d["wind_retracted"] = st[i].windLocked;
+  JsonArray pr = d["presets"].to<JsonArray>();
+  for (int k = 0; k < 4; ++k) if (cfg[i].presetPos[k] >= 0) pr.add(cfg[i].presetName[k] + " " + String(cfg[i].presetPos[k]) + "%");
+  mqtt.publish(blindTopic(i, "lock").c_str(), st[i].locked ? "ON" : "OFF", true);
+  mqtt.publish(blindTopic(i, "available").c_str(), (radioReady && remoteComplete()) ? "online" : "offline", true);
   publishJson(blindTopic(i, "attributes"), d);
   st[i].lastPublishMs = millis();
   st[i].dirty = false;
@@ -832,6 +971,7 @@ void publishDiagnostics() {
   mqtt.publish(topic("diag/ip").c_str(), WiFi.localIP().toString().c_str(), true);
   mqtt.publish(topic("diag/radio").c_str(), radioReady ? "ON" : "OFF", true);
   mqtt.publish(topic("diag/last_remote").c_str(), lastEventText.c_str(), true);
+  if (lastRssi) mqtt.publish(topic("diag/radio_rssi").c_str(), String(lastRssi).c_str(), true);
   lastDiagMs = millis();
 }
 
@@ -846,7 +986,14 @@ bool allBlinds(String cmd, const String& source, String& err) {
   uint16_t normal = 0, reversed = 0;
   for (size_t i = 0; i < blindCount; ++i) (cfg[i].invert ? reversed : normal) |= cfg[i].mask;
   reversed &= ~normal;
-  if (!normal && !reversed) { err = "no blinds set up"; return false; }
+  // Locked blinds, awnings held for wind and (when closing) blinds with the window open sit this one out.
+  uint16_t held = 0;
+  if (a != aok::Action::Stop)
+    for (size_t i = 0; i < blindCount; ++i)
+      if ((st[i].locked && source != "wind") || st[i].windLocked || (a == aok::Action::Close && st[i].interlock)) held |= cfg[i].mask;
+  normal &= ~held; reversed &= ~held;
+  if (held) LOGI("All blinds: leaving out channel %s (locked, wind or window open)", maskText(held).c_str());
+  if (!normal && !reversed) { err = held ? "every blind is locked or held" : "no blinds set up"; return false; }
   const aok::Action flip = a == aok::Action::Open ? aok::Action::Close : a == aok::Action::Close ? aok::Action::Open : a;
   if (normal) { if (!sendAction(normal, a, err)) return false; applyAction(normal, a, source, -1, -1); }
   if (reversed) { if (!sendAction(reversed, flip, err)) return false; applyAction(reversed, flip, source, -1, -1); }
@@ -861,6 +1008,23 @@ void onMqtt(char* t, byte* payload, unsigned int len) {
   if (!msg.length()) return;
   if (tp == topic("learn/set")) { learnMode = true; learnLocked = false; learnStartedMs = millis(); learnStatus = "waiting"; return; }
   if (tp == topic("all/set")) { String err; if (!allBlinds(msg, "home_assistant", err)) LOGW("All blinds: %s", err.c_str()); return; }
+  if (tp == topic("scene/set")) { String err; if (!runScene(msg, "home_assistant", err)) LOGW("Scene %s: %s", msg.c_str(), err.c_str()); return; }
+  if (tp == topic("channels/set")) { String err; if (!channelCommand(msg, "home_assistant", err)) LOGW("Channels %s: %s", msg.c_str(), err.c_str()); return; }
+  if (tp == topic("wind")) { setWind(msg.equalsIgnoreCase("ON") || msg == "1" || msg.equalsIgnoreCase("true")); return; }
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (tp == blindTopic(i, "lock/set")) { setLock(i, msg.equalsIgnoreCase("ON") || msg.equalsIgnoreCase("LOCK")); return; }
+    if (tp == blindTopic(i, "interlock")) {
+      const bool open = msg.equalsIgnoreCase("ON") || msg.equalsIgnoreCase("open") || msg == "1";
+      if (open != st[i].interlock) {
+        st[i].interlock = open;
+        st[i].dirty = true;
+        LOGI("%s: window %s", cfg[i].name.c_str(), open ? "open, closing blocked" : "shut");
+        String err;
+        if (open && st[i].motion == Motion::Closing) stopBlind(i, "interlock", err);
+      }
+      return;
+    }
+  }
   for (size_t i = 0; i < blindCount; ++i) {
     if (tp == blindTopic(i, "set") || tp == blindTopic(i, "set_position")) {
       String err;
@@ -872,6 +1036,7 @@ void onMqtt(char* t, byte* payload, unsigned int len) {
 }
 
 void ensureMqtt() {
+  if (safeMode) return;
   if (apMode && WiFi.status() != WL_CONNECTED) return;
   if (WiFi.status() != WL_CONNECTED || !net.mqttHost.length() || mqtt.connected()) return;
   if (lastMqttTryMs && millis() - lastMqttTryMs < mqttRetryMs) return;
@@ -898,9 +1063,14 @@ void ensureMqtt() {
   mqtt.publish(will.c_str(), "online", true);
   mqtt.subscribe(topic("learn/set").c_str());
   mqtt.subscribe(topic("all/set").c_str());
+  mqtt.subscribe(topic("scene/set").c_str());
+  mqtt.subscribe(topic("channels/set").c_str());
+  mqtt.subscribe(topic("wind").c_str());
   for (size_t i = 0; i < blindCount; ++i) {
     mqtt.subscribe(blindTopic(i, "set").c_str());
     mqtt.subscribe(blindTopic(i, "set_position").c_str());
+    mqtt.subscribe(blindTopic(i, "lock/set").c_str());
+    mqtt.subscribe(blindTopic(i, "interlock").c_str());
   }
   publishDiscovery();
   for (size_t i = 0; i < blindCount; ++i) publishBlind(i);
@@ -910,7 +1080,21 @@ void ensureMqtt() {
 // ---------------------------------------------------------------- commands
 bool handleBlindCommand(size_t i, String cmd, const String& source, String& err) {
   cmd.trim();
+  String arg;
+  if (cmd.indexOf(':') > 0) { arg = cmd.substring(cmd.indexOf(':') + 1); arg.trim(); cmd = cmd.substring(0, cmd.indexOf(':')); }
   cmd.toUpperCase();
+  if (cmd == "LOCK" || cmd == "UNLOCK") { setLock(i, cmd == "LOCK"); return true; }
+  const bool moving = cmd != "STOP" && cmd != "SYNC_OPEN" && cmd != "SYNC_CLOSE";
+  if (moving && st[i].windLocked && source != "wind") { err = "retracted for wind: it moves again when the wind drops"; return false; }
+  if (moving && st[i].locked && source != "wind") { err = "locked: unlock it first"; return false; }
+  if (cmd == "PRESET") {
+    for (int k = 0; k < 4; ++k) {
+      if (cfg[i].presetPos[k] < 0) continue;
+      if (arg == String(k + 1) || arg.equalsIgnoreCase(cfg[i].presetName[k])) return handleBlindCommand(i, String(cfg[i].presetPos[k]), source, err);
+    }
+    err = String("no preset called ") + arg;
+    return false;
+  }
   if (cmd == "OPEN") return moveTo(i, 100, source, err);
   if (cmd == "CLOSE") return moveTo(i, 0, source, err);
   if (cmd == "STOP") return stopBlind(i, source, err);
@@ -991,6 +1175,236 @@ void updateMotion() {
   for (size_t i = 0; i < blindCount; ++i) if (st[i].dirty) publishBlind(i);
 }
 
+
+// ---------------------------------------------------------------- locks, wind, scenes, schedules
+bool remoteKnown(uint32_t prefix, uint8_t id) {
+  for (uint8_t k = 0; k < remote.extraCount; ++k)
+    if (remote.extraPrefix[k] == prefix && remote.extraId[k] == id) return true;
+  return false;
+}
+
+void saveLocks() {
+  JsonDocument d; JsonArray a = d.to<JsonArray>();
+  for (size_t i = 0; i < blindCount; ++i) if (st[i].locked) a.add(cfg[i].id);
+  String s; serializeJson(d, s); prefs.putString("locks", s);
+}
+
+void loadLocks() {
+  JsonDocument d;
+  if (deserializeJson(d, prefs.getString("locks", "[]"))) return;
+  for (JsonVariantConst v : d.as<JsonArrayConst>()) { const int i = findBlind(v.as<String>()); if (i >= 0) st[i].locked = true; }
+}
+
+void setLock(size_t i, bool locked, bool save) {
+  if (st[i].locked == locked) { st[i].dirty = true; return; }
+  st[i].locked = locked;
+  st[i].dirty = true;
+  LOGI("%s %s", cfg[i].name.c_str(), locked ? "locked" : "unlocked");
+  if (save) saveLocks();
+}
+
+// Wind on: retract every awning (close it) and keep it there until the wind drops.
+void setWind(bool on) {
+  if (on == windActive) return;
+  windActive = on;
+  LOGI("Wind %s", on ? "alarm: retracting awnings" : "has dropped: awnings released");
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (cfg[i].deviceClass != "awning") continue;
+    st[i].windLocked = on;
+    st[i].dirty = true;
+    if (on) { String err; if (!handleBlindCommand(i, "CLOSE", "wind", err)) LOGW("%s: %s", cfg[i].name.c_str(), err.c_str()); }
+  }
+  stateRev++;
+}
+
+// "1,3:OPEN", "2:STOP" or "1-4:CLOSE": any channels in one radio frame.
+bool channelCommand(const String& payload, const String& source, String& err) {
+  const int colon = payload.indexOf(':');
+  if (colon <= 0) { err = "use channels:command, for example 1,3:OPEN"; return false; }
+  String chans = payload.substring(0, colon);
+  String cmd = payload.substring(colon + 1); cmd.trim(); cmd.toUpperCase();
+  uint16_t mask = 0;
+  const int dash = chans.indexOf('-');
+  if (dash > 0) {
+    const int a = chans.substring(0, dash).toInt(), b = chans.substring(dash + 1).toInt();
+    for (int c = max(1, a); c <= min(16, b); ++c) mask |= 1u << (c - 1);
+  } else {
+    mask = parseChannels(chans);
+  }
+  if (!mask) { err = "no channels (1-16) given"; return false; }
+  const aok::Action a = cmd == "OPEN" || cmd == "UP" ? aok::Action::Open : cmd == "CLOSE" || cmd == "DOWN" ? aok::Action::Close
+                       : cmd == "STOP" ? aok::Action::Stop : aok::Action::Unknown;
+  if (a == aok::Action::Unknown) { err = "command must be OPEN, CLOSE or STOP"; return false; }
+  for (size_t i = 0; i < blindCount; ++i)
+    if ((cfg[i].mask & ~mask) == 0 && a != aok::Action::Stop && (st[i].locked || st[i].windLocked)) {
+      err = cfg[i].name + " is locked"; return false;
+    }
+  if (!sendAction(mask, a, err)) return false;
+  applyAction(mask, a, source, -1, -1);
+  return true;
+}
+
+int findScene(const String& key) {
+  for (size_t k = 0; k < sceneCount; ++k)
+    if (scenes[k].id == key || scenes[k].name.equalsIgnoreCase(key)) return static_cast<int>(k);
+  return -1;
+}
+
+bool runScene(const String& key, const String& source, String& err) {
+  String k = key; k.trim();
+  const int s = findScene(k);
+  if (s < 0) { err = String("no scene called ") + k; return false; }
+  LOGI("Scene %s (%s)", scenes[s].name.c_str(), source.c_str());
+  bool any = false;
+  for (uint8_t n = 0; n < scenes[s].count; ++n) {
+    const int i = findBlind(scenes[s].items[n].id);
+    if (i < 0) continue;
+    String e;
+    if (handleBlindCommand(i, String(scenes[s].items[n].position), source, e)) any = true;
+    else LOGW("Scene %s, %s: %s", scenes[s].name.c_str(), cfg[i].name.c_str(), e.c_str());
+  }
+  if (!any) { err = "no blind in the scene could move"; return false; }
+  return true;
+}
+
+void automationToJson(JsonObject o) {
+  if (!isnan(siteLat)) { o["latitude"] = siteLat; o["longitude"] = siteLon; }
+  JsonArray sc = o["scenes"].to<JsonArray>();
+  for (size_t k = 0; k < sceneCount; ++k) {
+    JsonObject x = sc.add<JsonObject>();
+    x["id"] = scenes[k].id; x["name"] = scenes[k].name;
+    JsonArray it = x["blinds"].to<JsonArray>();
+    for (uint8_t n = 0; n < scenes[k].count; ++n) {
+      JsonObject y = it.add<JsonObject>(); y["id"] = scenes[k].items[n].id; y["position"] = scenes[k].items[n].position;
+    }
+  }
+  JsonArray sh = o["schedules"].to<JsonArray>();
+  for (size_t k = 0; k < scheduleCount; ++k) {
+    const Schedule& x = schedules[k];
+    JsonObject y = sh.add<JsonObject>();
+    y["enabled"] = x.enabled; y["days"] = x.days;
+    y["when"] = x.when == When::Sunrise ? "sunrise" : x.when == When::Sunset ? "sunset" : "time";
+    y["minutes"] = x.minutes; y["target"] = x.target; y["action"] = x.action;
+  }
+}
+
+bool automationFromJson(JsonObjectConst o, String& err) {
+  Scene nextScenes[kMaxScenes]; size_t ns = 0;
+  for (JsonObjectConst x : o["scenes"].as<JsonArrayConst>()) {
+    if (ns >= kMaxScenes) { err = "up to 8 scenes"; return false; }
+    Scene sc;
+    sc.name = x["name"] | ""; sc.name.trim();
+    if (!sc.name.length()) { err = "every scene needs a name"; return false; }
+    sc.id = slug(x["id"] | sc.name);
+    for (size_t k = 0; k < ns; ++k) if (nextScenes[k].id == sc.id) sc.id += String("_") + ns;
+    for (JsonObjectConst y : x["blinds"].as<JsonArrayConst>()) {
+      if (sc.count >= kMaxSceneItems) break;
+      sc.items[sc.count].id = y["id"] | "";
+      sc.items[sc.count].position = clampPos(y["position"] | 0);
+      if (sc.items[sc.count].id.length()) sc.count++;
+    }
+    nextScenes[ns++] = sc;
+  }
+  Schedule nextSched[kMaxSchedules]; size_t nh = 0;
+  for (JsonObjectConst x : o["schedules"].as<JsonArrayConst>()) {
+    if (nh >= kMaxSchedules) { err = "up to 12 schedules"; return false; }
+    Schedule s;
+    s.enabled = x["enabled"] | true;
+    s.days = static_cast<uint8_t>((x["days"] | 0x7F) & 0x7F);
+    const String w = x["when"] | "time";
+    s.when = w == "sunrise" ? When::Sunrise : w == "sunset" ? When::Sunset : When::Time;
+    s.minutes = static_cast<int16_t>(x["minutes"] | 0);
+    if (s.when == When::Time && (s.minutes < 0 || s.minutes >= 1440)) { err = "a schedule time must be 00:00-23:59"; return false; }
+    if (s.when != When::Time && (s.minutes < -240 || s.minutes > 240)) { err = "sunrise/sunset offsets are up to 4 hours"; return false; }
+    s.target = x["target"] | "all"; s.action = x["action"] | "OPEN"; s.action.toUpperCase();
+    if (s.when != When::Time && (isnan(o["latitude"] | NAN))) { err = "set your location to use sunrise or sunset"; return false; }
+    nextSched[nh++] = s;
+  }
+  for (size_t k = 0; k < ns; ++k) scenes[k] = nextScenes[k];
+  sceneCount = ns;
+  for (size_t k = 0; k < nh; ++k) schedules[k] = nextSched[k];
+  scheduleCount = nh;
+  siteLat = o["latitude"] | NAN; siteLon = o["longitude"] | NAN;
+  return true;
+}
+
+void saveAutomation() {
+  JsonDocument d; automationToJson(d.to<JsonObject>());
+  String s; serializeJson(d, s); prefs.putString("auto", s);
+}
+
+void loadAutomation() {
+  JsonDocument d; String err;
+  if (deserializeJson(d, prefs.getString("auto", "{}"))) return;
+  if (!automationFromJson(d.as<JsonObjectConst>(), err)) LOGW("Saved schedules not loaded: %s", err.c_str());
+}
+
+int utcOffsetMinutes() {
+  const time_t now = time(nullptr);
+  struct tm lt, gt;
+  localtime_r(&now, &lt); gmtime_r(&now, &gt);
+  gt.tm_isdst = lt.tm_isdst;
+  return static_cast<int>((now - mktime(&gt)) / 60);
+}
+
+// Minute of the day a schedule runs today, or -1.
+int scheduleMinute(const Schedule& s, const struct tm& lt) {
+  if (s.when == When::Time) return s.minutes;
+  if (isnan(siteLat)) return -1;
+  const int sun = aok::sunMinutes(s.when == When::Sunrise, lt.tm_yday, siteLat, siteLon, utcOffsetMinutes());
+  if (sun < 0) return -1;
+  const int m = sun + s.minutes;
+  return (m < 0 || m >= 1440) ? -1 : m;
+}
+
+void runSchedule(Schedule& s) {
+  String err;
+  bool ok;
+  if (s.target.startsWith("scene:")) ok = runScene(s.target.substring(6), "schedule", err);
+  else if (s.target == "all") {
+    if (s.action == "OPEN" || s.action == "CLOSE" || s.action == "STOP") ok = allBlinds(s.action, "schedule", err);
+    else {
+      ok = false;
+      for (size_t i = 0; i < blindCount; ++i) if (__builtin_popcount(cfg[i].mask) == 1) { String e; ok |= handleBlindCommand(i, s.action, "schedule", e); }
+      if (!ok) err = "no blind could move";
+    }
+  } else {
+    const int i = findBlind(s.target);
+    ok = i >= 0 && handleBlindCommand(i, s.action, "schedule", err);
+    if (i < 0) err = "blind not found";
+  }
+  if (ok) LOGI("Schedule: %s → %s", s.target.c_str(), s.action.c_str());
+  else LOGW("Schedule %s → %s: %s", s.target.c_str(), s.action.c_str(), err.c_str());
+}
+
+void checkSchedules() {
+  if (!scheduleCount || !wallClock()) return;
+  const time_t now = time(nullptr);
+  struct tm lt; localtime_r(&now, &lt);
+  const int minute = lt.tm_hour * 60 + lt.tm_min;
+  if (minute == lastScheduleMinute) return;
+  lastScheduleMinute = minute;
+  const int weekday = (lt.tm_wday + 6) % 7;  // 0 = Monday
+  for (size_t k = 0; k < scheduleCount; ++k) {
+    Schedule& s = schedules[k];
+    if (!s.enabled || !(s.days & (1 << weekday)) || s.lastDay == lt.tm_yday) continue;
+    if (scheduleMinute(s, lt) != minute) continue;
+    s.lastDay = lt.tm_yday;
+    runSchedule(s);
+  }
+}
+
+// A held hand-remote button: once frames stop, report a long press (1.5 s or more).
+void finishPress() {
+  if (!pressActive || millis() - lastPayloadMs < 500) return;
+  pressActive = false;
+  if (lastPayloadMs - pressStartMs < 1500 || !mqtt.connected()) return;
+  JsonDocument d;
+  d["event_type"] = String(aok::actionName(pressAction)) + "_long";
+  d["seconds"] = (lastPayloadMs - pressStartMs) / 1000.0f;
+  publishJson(topic("remote/event"), d, false);
+}
+
 // ---------------------------------------------------------------- received frames
 void recordFrame(const aok::Frame& f, bool matched) {
   if (frameCount && frames[(frameHead + kMaxFrames - 1) % kMaxFrames].f.payload == f.payload &&
@@ -1001,7 +1415,7 @@ void recordFrame(const aok::Frame& f, bool matched) {
     return;
   }
   stateRev++;
-  frames[frameHead] = HeardFrame{millis(), f, matched, 1};
+  frames[frameHead] = HeardFrame{millis(), f, matched, 1, lastRssi};
   frameHead = (frameHead + 1) % kMaxFrames;
   if (frameCount < kMaxFrames) frameCount++;
 }
@@ -1012,12 +1426,27 @@ void onPayload(uint64_t payload) {
   const bool repeat = payload == lastPayload && now - lastPayloadMs < kDedupeMs;
   lastPayload = payload;
   lastPayloadMs = now;
-  const bool matched = (remote.have[0] || remote.have[1] || remote.have[2]) && f.prefix == remote.prefix && f.remoteId == remote.remoteId;
+  if (radioReady) lastRssi = static_cast<int16_t>(ELECHOUSE_cc1101.getRssi());
+  const bool fromMain = (remote.have[0] || remote.have[1] || remote.have[2]) && f.prefix == remote.prefix && f.remoteId == remote.remoteId;
+  const bool matched = fromMain || remoteKnown(f.prefix, f.remoteId);
   recordFrame(f, matched);
   if (repeat) return;
   lastRxFlashMs = now;
   if (f.action == aok::Action::Unknown || !f.mask) return;
 
+  if (learnMode && learnExtra) {
+    // Adding another remote: the first press from one the bridge doesn't know yet.
+    if (fromMain || remoteKnown(f.prefix, f.remoteId)) { learnStatus = "that remote is already known: press a button on the new one"; return; }
+    if (remote.extraCount >= 3) { learnStatus = "already following 3 extra remotes: remove one first"; learnMode = false; return; }
+    remote.extraPrefix[remote.extraCount] = f.prefix;
+    remote.extraId[remote.extraCount] = f.remoteId;
+    remote.extraCount++;
+    saveRemote();
+    learnMode = false; learnExtra = false;
+    learnStatus = String("added remote ") + hex(f.remoteId, 2);
+    LOGI("Remote learning: %s", learnStatus.c_str());
+    return;
+  }
   if (learnMode) {
     if (learnLocked && (f.prefix != learnPrefix || f.remoteId != learnRemoteId)) {
       // Someone else's remote (a neighbour's?) mid-learning: ignore it, don't start over.
@@ -1041,7 +1470,8 @@ void onPayload(uint64_t payload) {
   }
 
   if (!matched) return;
-  if ((remote.seen | f.mask) != remote.seen) { remote.seen |= f.mask; saveRemote(); }
+  pressActive = true; pressStartMs = now; pressAction = f.action;
+  if (fromMain && (remote.seen | f.mask) != remote.seen) { remote.seen |= f.mask; saveRemote(); }
   LOGI("Remote: %s on channel %s", f.action == aok::Action::Open ? "Up" : f.action == aok::Action::Close ? "Down" : "Stop", maskText(f.mask).c_str());
   lastEventText = String(aok::actionName(f.action)) + " · channel " + maskText(f.mask);
   if (mqtt.connected()) {
@@ -1062,7 +1492,7 @@ void pollRadio() {
     ringTail = (ringTail + 1) & (kRingSize - 1);
     if (decoder.feed(v & 0x7FFFFFFF, (v & 0x80000000u) != 0, payload)) onPayload(payload);
   }
-  if (learnMode && millis() - learnStartedMs > 120000) { learnMode = false; learnStatus = remoteComplete() ? "complete" : "timed out"; }
+  if (learnMode && millis() - learnStartedMs > 120000) { learnMode = false; learnExtra = false; learnStatus = remoteComplete() ? "complete" : "timed out"; }
 }
 
 // ---------------------------------------------------------------- web
@@ -1108,6 +1538,9 @@ void handleState() {
   JsonDocument d;
   d["fw"] = FW_VERSION; d["uptime"] = millis() / 1000; d["heap"] = ESP.getFreeHeap();
   d["rev"] = stateRev; d["brand"] = net.brand; d["lite"] = lite;
+  d["safe_mode"] = safeMode; d["wind"] = windActive;
+  JsonArray scl = d["scenes"].to<JsonArray>();
+  for (size_t k = 0; k < sceneCount; ++k) { JsonObject x = scl.add<JsonObject>(); x["id"] = scenes[k].id; x["name"] = scenes[k].name; }
   d["reset_reason"] = static_cast<int>(esp_reset_reason());
   JsonObject w = d["wifi"].to<JsonObject>();
   w["connected"] = WiFi.status() == WL_CONNECTED; w["ssid"] = net.ssid; w["ip"] = WiFi.localIP().toString();
@@ -1116,6 +1549,7 @@ void handleState() {
   m["configured"] = net.mqttHost.length() > 0; m["connected"] = mqtt.connected(); m["state"] = mqtt.state();
   JsonObject r = d["radio"].to<JsonObject>();
   r["ready"] = radioReady; r["overflow"] = static_cast<uint32_t>(ringOverflow); r["mhz"] = pins.mhz;
+  if (lastRssi) r["last_rssi"] = lastRssi;
   r["last_tx_ago_s"] = lastTxMs ? (millis() - lastTxMs) / 1000 : -1;
   r["last_rx_ago_s"] = lastRxFlashMs ? (millis() - lastRxFlashMs) / 1000 : -1;
   JsonObject rm = d["remote"].to<JsonObject>();
@@ -1128,6 +1562,7 @@ void handleState() {
     int pos; Motion mo; displayState(i, pos, mo);
     o["position"] = pos; o["motion"] = motionName(mo); o["target"] = st[i].target; o["source"] = st[i].lastSource;
     o["group"] = __builtin_popcount(cfg[i].mask) > 1;
+    o["locked"] = st[i].locked; o["window_open"] = st[i].interlock; o["wind"] = st[i].windLocked;
     if (mo != Motion::Stopped && pos >= 0) {
       // lets the page animate smoothly between polls: % per second and where the run ends
       o["rate"] = 100000.0f / static_cast<float>(travelMs(i, mo));
@@ -1142,6 +1577,7 @@ void handleState() {
     o["ago_s"] = (millis() - h.ms) / 1000; o["payload"] = hex(h.f.payload, 16); o["remote_id"] = hex(h.f.remoteId, 2);
     o["prefix"] = hex(h.f.prefix, 6); o["channels"] = maskText(h.f.mask); o["action"] = aok::actionName(h.f.action);
     o["matched"] = h.matched; o["repeats"] = h.repeats; o["kind"] = frameKind(h.f);
+    if (h.rssi) o["rssi"] = h.rssi;
     o["code"] = hex((h.f.command >> 8) & 0xFF, 2);
     if (wallClock()) o["when"] = static_cast<uint32_t>(wallClock() - (millis() - h.ms) / 1000);
   }
@@ -1224,7 +1660,9 @@ void handleRemotePost() {
   JsonDocument d; if (!bodyJson(d)) return;
   const String action = d["action"] | "";
   if (action == "learn") { learnMode = true; learnLocked = false; learnStartedMs = millis(); learnStatus = "waiting"; LOGI("Remote learning started"); }
-  else if (action == "cancel") { learnMode = false; learnStatus = "cancelled"; }
+  else if (action == "learn_extra") { learnMode = true; learnExtra = true; learnLocked = false; learnStartedMs = millis(); learnStatus = "press any button on the other remote"; LOGI("Adding another remote"); }
+  else if (action == "forget_extra") { remote.extraCount = 0; saveRemote(); LOGI("Extra remotes forgotten"); }
+  else if (action == "cancel") { learnMode = false; learnExtra = false; learnStatus = "cancelled"; }
   else if (action == "forget") { for (bool& h : remote.have) h = false; remote.prefix = 0; remote.remoteId = 0; remote.seen = 0; saveRemote(); learnStatus = "idle"; LOGI("Remote forgotten"); }
   else if (action == "save") { remoteFromJson(d["remote"].as<JsonObjectConst>()); saveRemote(); }
   else { sendError("unknown action"); return; }
@@ -1423,6 +1861,7 @@ void handleBackup() {
   remoteToJson(d["remote"].to<JsonObject>());
   JsonArray b = d["blinds"].to<JsonArray>();
   for (size_t i = 0; i < blindCount; ++i) blindToJson(i, b.add<JsonObject>());
+  automationToJson(d["automation"].to<JsonObject>());
   web.sendHeader("Content-Disposition", String("attachment; filename=") + net.hostname + "-backup.json");
   sendJson(d);
 }
@@ -1448,10 +1887,52 @@ void handleRestore() {
     pins.led = p["led"] | pins.led; pins.mhz = p["mhz"] | pins.mhz; pins.paDbm = p["pa_dbm"] | pins.paDbm;
   }
   if (!d["remote"].isNull()) remoteFromJson(d["remote"].as<JsonObjectConst>());
-  saveNet(); savePins(); saveRemote(); saveBlinds(); savePositions();
+  if (!d["automation"].isNull() && !automationFromJson(d["automation"].as<JsonObjectConst>(), err)) LOGW("Backup schedules skipped: %s", err.c_str());
+  saveNet(); savePins(); saveRemote(); saveBlinds(); savePositions(); saveAutomation();
   LOGI("Settings restored from a backup (%u blinds), restarting", static_cast<unsigned>(blindCount));
   scheduleReboot(1500);
   JsonDocument r; r["ok"] = true; r["rebooting"] = true; sendJson(r);
+}
+
+void handleAutomationGet() {
+  if (!authed()) return;
+  JsonDocument d; automationToJson(d.to<JsonObject>());
+  if (!isnan(siteLat) && wallClock()) {
+    const time_t now = time(nullptr); struct tm lt; localtime_r(&now, &lt);
+    d["sunrise"] = aok::sunMinutes(true, lt.tm_yday, siteLat, siteLon, utcOffsetMinutes());
+    d["sunset"] = aok::sunMinutes(false, lt.tm_yday, siteLat, siteLon, utcOffsetMinutes());
+  }
+  d["wind"] = windActive;
+  sendJson(d);
+}
+
+void handleAutomationPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  String err;
+  if (!automationFromJson(d.as<JsonObjectConst>(), err)) { sendError(err); return; }
+  saveAutomation();
+  discoveryPending = true;
+  stateRev++;
+  LOGI("Scenes and schedules saved: %u scenes, %u schedules", static_cast<unsigned>(sceneCount), static_cast<unsigned>(scheduleCount));
+  sendOk();
+}
+
+void handleScenePost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  String err;
+  if (!runScene(d["id"] | "", "web", err)) { sendError(err); return; }
+  sendOk();
+}
+
+void handleLockPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  const int i = findBlind(d["id"] | "");
+  if (i < 0) { sendError("unknown blind"); return; }
+  setLock(i, d["locked"] | false);
+  sendOk();
 }
 
 void handleReboot() { if (!authed()) return; LOGI("Restart requested from the web page"); sendOk(); scheduleReboot(800); }
@@ -1571,6 +2052,10 @@ void setupWeb() {
   web.on("/api/mqtt/discover", HTTP_GET, handleMqttDiscover);
   web.on("/api/mqtt/test", HTTP_POST, handleMqttTest);
   web.on("/api/log", HTTP_GET, handleLog);
+  web.on("/api/automation", HTTP_GET, handleAutomationGet);
+  web.on("/api/automation", HTTP_POST, handleAutomationPost);
+  web.on("/api/scene", HTTP_POST, handleScenePost);
+  web.on("/api/lock", HTTP_POST, handleLockPost);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   // Phones and Windows probe these when they join the setup Wi-Fi; answering them
   // directly opens the setup page and stops "request handler not found" log spam.
@@ -1769,6 +2254,18 @@ void setup() {
   loadBlinds();
   loadPositions();
   loadCalHistory();
+  loadAutomation();
+  loadLocks();
+  {
+    // Safe mode: after 3 crashes in a row, start without the radio and MQTT so the
+    // page and updates still work and a bad setting can be fixed.
+    const esp_reset_reason_t rr = esp_reset_reason();
+    if (crashMagic != 0xB11DB00Bu) { crashMagic = 0xB11DB00Bu; crashCount = 0; }
+    const bool crashed = rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT;
+    crashCount = crashed ? crashCount + 1 : 0;
+    safeMode = crashCount >= 3;
+    if (safeMode) LOGE("Safe mode: the bridge crashed %u times in a row. Radio and MQTT are off; fix the settings or update the firmware, then restart.", static_cast<unsigned>(crashCount));
+  }
   {
     const esp_reset_reason_t rr = esp_reset_reason();
     const char* why = rr == ESP_RST_POWERON ? "power on" : rr == ESP_RST_SW ? "restart" : rr == ESP_RST_BROWNOUT ? "low voltage"
@@ -1776,7 +2273,7 @@ void setup() {
     LOGI("%s Blind Bridge %s started after %s, %u blinds", net.brand.c_str(), FW_VERSION, why, static_cast<unsigned>(blindCount));
   }
   if (pins.led >= 0) { pinMode(pins.led, OUTPUT); ledSet(true); }
-  setupRadio();
+  if (!safeMode) setupRadio();
   setupWifi();
   setupWeb();
   mqtt.setBufferSize(2048);
@@ -1793,6 +2290,9 @@ void loop() {
   if (mqtt.connected()) mqtt.loop();
   pollRadio();
   updateMotion();
+  finishPress();
+  checkSchedules();
+  if (crashCount && millis() > 120000) crashCount = 0;  // ran for 2 minutes: the crash streak is over
   if (mqtt.connected() && millis() - lastDiagMs > 30000) publishDiagnostics();
   if (calIndex >= 0 && millis() - calStartMs > 300000) calIndex = -1;
   updateLed();
