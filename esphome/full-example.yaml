@@ -1,0 +1,260 @@
+# Everything the bridge firmware does, in ESPHome: positions, named positions,
+# scenes, schedules (time and sunrise/sunset), lock, window interlock, wind,
+# other remotes, long presses, signal strength, repeater, frequency scan and
+# pairing a motor to the component's own ID.
+#
+# Start with example.yaml; copy the parts you want from here. Replace the
+# remote codes with yours (see docs/esphome.md).
+esphome:
+  name: aok-blinds-full
+  friendly_name: Blinds
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+api:
+ota:
+  - platform: esphome
+wifi:
+  ap: {}
+captive_portal:
+
+# Time and position for schedules. Home Assistant's time keeps the clock right;
+# set your own latitude/longitude for sunrise and sunset.
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time:
+      # Weekdays 7:00: open everything that isn't locked.
+      - seconds: 0
+        minutes: 0
+        hours: 7
+        days_of_week: MON-FRI
+        then:
+          - script.execute: { id: all_blinds, action_name: "open" }
+
+sun:
+  latitude: -37.81
+  longitude: 144.96
+  on_sunset:
+    # 15 minutes after sunset (elevation about -3°): the Evening scene.
+    - elevation: -3°
+      then:
+        - script.execute: scene_evening
+  on_sunrise:
+    - elevation: 0°
+      then:
+        - if:
+            condition:
+              binary_sensor.is_off: wind
+            then:
+              - cover.open: awning
+
+aok_rf:
+  id: rf
+  remote:
+    prefix: 0xA1B2C3
+    remote_id: 0x3F
+    up: 0xF42A
+    down: 0xBCF2
+    stop: 0xDC12
+    # Press P on the hand remote once and copy the "program:" line from the log.
+    program: 0xAC40
+  # A second hand remote: its presses also count as "my_remote".
+  extra_remotes:
+    - prefix: 0x0F0E0D
+      remote_id: 0x7A
+  # The component's own remote ID, and the channels whose motors are paired to it
+  # (use the "Pair channel 3" button below, then add the channel here).
+  own_id: 0x99
+  own_channels: [3]
+  # Send each hand-remote press again, for a motor at the edge of the remote's range.
+  repeat_remote: false
+  rssi:
+    name: Remote signal
+  # Follow the hand remote (channel 1 here).
+  on_frame:
+    - if:
+        condition:
+          lambda: 'return my_remote && channels == 0x0001;'
+        then:
+          - lambda: |-
+              auto call = id(lounge_left).make_call();
+              if (action == "up") call.set_command_open();
+              else if (action == "down") call.set_command_close();
+              else if (action == "stop") call.set_command_stop();
+              else return;
+              call.perform();
+  # Hold Up on channel 1 for 1.5 s or more: the Morning scene.
+  on_long_press:
+    - if:
+        condition:
+          lambda: 'return action == "up" && channels == 0x0001;'
+        then:
+          - script.execute: scene_morning
+
+# Window sensor and wind alarm from Home Assistant.
+binary_sensor:
+  - platform: homeassistant
+    id: lounge_window
+    entity_id: binary_sensor.lounge_window
+    on_press:
+      # Window opened while closing: stop.
+      - if:
+          condition:
+            lambda: 'return id(lounge_left).current_operation == COVER_OPERATION_CLOSING;'
+          then:
+            - cover.stop: lounge_left
+  - platform: homeassistant
+    id: wind
+    entity_id: binary_sensor.wind_alarm
+    on_press:
+      - cover.close: awning  # retract
+
+switch:
+  - platform: template
+    id: lounge_left_lock
+    name: Lounge left lock
+    icon: mdi:lock
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+cover:
+  - platform: time_based
+    id: lounge_left
+    name: Lounge left
+    device_class: shade
+    has_built_in_endstop: true
+    open_duration: 24s
+    close_duration: 22s
+    open_action:
+      - if:
+          condition:
+            switch.is_on: lounge_left_lock
+          then:
+            - logger.log: "Lounge left is locked"
+            - cover.stop: lounge_left
+          else:
+            - aok_rf.send: { id: rf, channels: 1, action: up }
+    close_action:
+      - if:
+          condition:
+            or:
+              - switch.is_on: lounge_left_lock
+              - binary_sensor.is_on: lounge_window
+          then:
+            - logger.log: "Lounge left: locked or the window is open"
+            - cover.stop: lounge_left
+          else:
+            - aok_rf.send: { id: rf, channels: 1, action: down }
+    stop_action:
+      - aok_rf.send: { id: rf, channels: 1, action: stop }
+
+  - platform: time_based
+    id: lounge_right
+    name: Lounge right
+    device_class: shade
+    has_built_in_endstop: true
+    open_duration: 25s
+    close_duration: 23s
+    open_action:
+      - aok_rf.send: { id: rf, channels: 2, action: up }
+    close_action:
+      - aok_rf.send: { id: rf, channels: 2, action: down }
+    stop_action:
+      - aok_rf.send: { id: rf, channels: 2, action: stop }
+
+  # Channel 3 is paired to own_id: it keeps working without the hand remote.
+  - platform: time_based
+    id: awning
+    name: Awning
+    device_class: awning
+    has_built_in_endstop: true
+    open_duration: 30s
+    close_duration: 30s
+    open_action:
+      - if:
+          condition:
+            binary_sensor.is_on: wind
+          then:
+            - logger.log: "Awning held in for wind"
+            - cover.stop: awning
+          else:
+            - aok_rf.send: { id: rf, channels: 3, action: up }
+    close_action:
+      - aok_rf.send: { id: rf, channels: 3, action: down }
+    stop_action:
+      - aok_rf.send: { id: rf, channels: 3, action: stop }
+
+script:
+  # Open, close or stop every blind that isn't locked.
+  - id: all_blinds
+    parameters:
+      action_name: string
+    then:
+      - lambda: |-
+          for (auto *c : {id(lounge_left), id(lounge_right), id(awning)}) {
+            if (c == id(lounge_left) && id(lounge_left_lock).state) continue;
+            if (c == id(awning) && id(wind).state && action_name == "open") continue;
+            auto call = c->make_call();
+            if (action_name == "open") call.set_command_open();
+            else if (action_name == "close") call.set_command_close();
+            else call.set_command_stop();
+            call.perform();
+          }
+  - id: scene_morning
+    then:
+      - cover.control: { id: lounge_left, position: 100% }
+      - cover.control: { id: lounge_right, position: 70% }
+  - id: scene_evening
+    then:
+      - cover.control: { id: lounge_left, position: 0% }
+      - cover.control: { id: lounge_right, position: 30% }
+
+button:
+  # Named positions
+  - platform: template
+    name: Lounge left privacy
+    icon: mdi:blinds-horizontal
+    on_press:
+      - cover.control: { id: lounge_left, position: 30% }
+  # Scenes
+  - platform: template
+    name: Morning
+    icon: mdi:weather-sunny
+    on_press:
+      - script.execute: scene_morning
+  - platform: template
+    name: Evening
+    icon: mdi:weather-night
+    on_press:
+      - script.execute: scene_evening
+  # Groups in one radio frame
+  - platform: template
+    name: All blinds up
+    on_press:
+      - script.execute: { id: all_blinds, action_name: "open" }
+  - platform: template
+    name: All blinds down
+    on_press:
+      - script.execute: { id: all_blinds, action_name: "close" }
+  # Maintenance
+  - platform: template
+    name: Pair channel 3 to own ID
+    entity_category: config
+    on_press:
+      - aok_rf.pair: { id: rf, channels: 3 }
+  - platform: template
+    name: Frequency scan (hold a remote button)
+    entity_category: diagnostic
+    on_press:
+      - aok_rf.frequency_scan: rf

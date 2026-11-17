@@ -88,16 +88,68 @@ void AokRf::start_rx_() {
 
 void AokRf::stop_rx_() { detachInterrupt(digitalPinToInterrupt(gdo2_)); }
 
+bool AokRf::known_(uint32_t prefix, uint8_t id) const {
+  for (const auto &e : extra_)
+    if (e.prefix == prefix && e.id == id) return true;
+  return false;
+}
+
 bool AokRf::send(uint16_t mask, uint8_t action) {
   if (!ready_) { ESP_LOGW(TAG, "Radio not ready"); return false; }
   if (!have_remote_ || action > 2) {
     ESP_LOGW(TAG, "No remote set: add a remote: block (prefix, remote_id, up, down, stop) from the log");
     return false;
   }
-  const uint64_t payload = aok::makePayload(prefix_, remote_id_, mask, base_[action]);
+  const char *name = action == 0 ? "up" : action == 1 ? "down" : "stop";
+  const uint16_t own = own_id_ ? (mask & own_mask_) : 0, copied = mask & ~own;
+  bool ok = true;
+  if (copied) {
+    ESP_LOGI(TAG, "Sending %s on channel %s", name, mask_text(copied).c_str());
+    ok &= this->transmit_(aok::makePayload(prefix_, remote_id_, copied, base_[action]));
+  }
+  if (own) {
+    ESP_LOGI(TAG, "Sending %s on channel %s (own ID)", name, mask_text(own).c_str());
+    ok &= this->transmit_(aok::makePayload(prefix_, own_id_, own, base_[action]));
+  }
+  return ok;
+}
+
+void AokRf::pair(uint16_t mask, bool pressed_p_already) {
+  if (!ready_ || !have_remote_) { ESP_LOGW(TAG, "Pairing needs the radio and the remote: block"); return; }
+  if (!own_id_) { ESP_LOGW(TAG, "Pairing needs own_id: in the aok_rf: block"); return; }
+  if (!pressed_p_already && !have_program_) {
+    ESP_LOGW(TAG, "Pairing needs program: in remote: (press P on the hand remote and copy the code from the log), "
+                  "or press P twice on the hand remote and use pressed_p: true");
+    return;
+  }
+  pair_mask_ = mask;
+  pair_stage_ = pressed_p_already ? 2 : 0;
+  pair_at_ms_ = millis();
+  ESP_LOGI(TAG, "Pairing channel %s to own ID %02X", mask_text(mask).c_str(), own_id_);
+}
+
+void AokRf::frequency_scan() {
+  if (!ready_) return;
+  this->stop_rx_();
+  float best = mhz_;
+  int best_rssi = -200;
+  for (float f = 433.42f; f <= 434.425f; f += 0.05f) {
+    ELECHOUSE_cc1101.setMHZ(f);
+    ELECHOUSE_cc1101.SetRx(f);
+    int peak = -200;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 180) { peak = std::max(peak, ELECHOUSE_cc1101.getRssi()); delay(2); }
+    ESP_LOGD(TAG, "  %.2f MHz: %d dBm", f, peak);
+    if (peak > best_rssi) { best_rssi = peak; best = f; }
+  }
+  ELECHOUSE_cc1101.setMHZ(mhz_);
+  this->start_rx_();
+  ESP_LOGI(TAG, "Frequency scan: strongest at %.2f MHz (%d dBm); set frequency: %.2fMHz to use it", best, best_rssi, best);
+}
+
+bool AokRf::transmit_(uint64_t payload) {
   uint16_t pulses[aok::kFramePulses];
   const size_t n = aok::encodeFrame(payload, timings_, pulses, aok::kFramePulses);
-  ESP_LOGI(TAG, "Sending %s on channel %s", action == 0 ? "up" : action == 1 ? "down" : "stop", mask_text(mask).c_str());
   this->stop_rx_();
   ELECHOUSE_cc1101.SetTx(mhz_);
   pinMode(gdo0_, OUTPUT);
@@ -117,6 +169,28 @@ bool AokRf::send(uint16_t mask, uint8_t action) {
 
 void AokRf::loop() {
   if (!ready_) return;
+  const uint32_t now = millis();
+  // a held button ended: long press event, and the repeater
+  if (press_active_ && now - last_payload_ms_ > 500) {
+    press_active_ = false;
+    const uint32_t held = last_payload_ms_ - press_start_ms_;
+    if (held >= 1500) long_callbacks_.call(press_kind_, press_mask_, held / 1000.0f);
+    if (repeat_ && press_payload_) { this->transmit_(press_payload_); ESP_LOGD(TAG, "Repeated the remote's press"); }
+  }
+  // pairing: P, P (2.5 s apart), then Up from the own ID
+  if (pair_mask_ && static_cast<int32_t>(now - pair_at_ms_) >= 0) {
+    if (pair_stage_ < 2) {
+      this->transmit_(aok::makePayload(prefix_, remote_id_, pair_mask_, program_));
+      ESP_LOGI(TAG, "Pairing: sent P (%u of 2): the motor should jog", pair_stage_ + 1);
+      pair_stage_++;
+      pair_at_ms_ = now + 2500;
+    } else {
+      this->transmit_(aok::makePayload(prefix_, own_id_, pair_mask_, base_[0]));
+      ESP_LOGI(TAG, "Pairing: sent Up from own ID %02X on channel %s. If the motor jogged, add it to own_channels:",
+               own_id_, mask_text(pair_mask_).c_str());
+      pair_mask_ = 0;
+    }
+  }
   uint64_t payload;
   uint16_t budget = 512;
   while (ring_tail != ring_head && budget--) {
@@ -133,8 +207,17 @@ void AokRf::on_payload_(uint64_t payload) {
   last_payload_ms_ = now;
   const aok::Frame f = aok::splitPayload(payload);
   if (!f.mask) return;
-  const bool mine = have_remote_ && f.prefix == prefix_ && f.remoteId == remote_id_;
+  const bool from_main = have_remote_ && f.prefix == prefix_ && f.remoteId == remote_id_;
+  const bool mine = from_main || this->known_(f.prefix, f.remoteId);
   const char *kind = kind_name(f.command);
+#ifdef USE_SENSOR
+  if (mine && rssi_sensor_ != nullptr) rssi_sensor_->publish_state(ELECHOUSE_cc1101.getRssi());
+#endif
+  if (from_main && ((f.command >> 8) & 0xFF) == 0xAC && !have_program_)
+    ESP_LOGI(TAG, "P button heard -> remote: program: 0x%04X", aok::deriveBase(f.remoteId, f.mask, f.command));
+  if (mine && f.action != aok::Action::Unknown) {
+    press_active_ = true; press_start_ms_ = now; press_kind_ = kind; press_mask_ = f.mask; press_payload_ = payload;
+  }
   if (mine) {
     ESP_LOGI(TAG, "Your remote: %s on channel %s", kind, mask_text(f.mask).c_str());
   } else if (f.action != aok::Action::Unknown) {

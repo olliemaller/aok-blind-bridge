@@ -39,5 +39,9 @@ jobs:
       - run: pip install esphome
       - name: Check the example config
         run: esphome config esphome/example.yaml
+      - name: Check the full example
+        run: esphome config esphome/full-example.yaml
       - name: Compile the example
         run: esphome compile esphome/example.yaml
+      - name: Compile the full example
+        run: esphome compile esphome/full-example.yaml

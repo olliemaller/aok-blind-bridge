@@ -6,7 +6,18 @@ every A-OK frame heard (your remote, other remotes, and buttons like P).
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
-from esphome.const import CONF_ID, CONF_FREQUENCY, CONF_TRIGGER_ID
+from esphome.components import sensor
+from esphome.const import (
+    CONF_FREQUENCY,
+    CONF_ID,
+    CONF_TRIGGER_ID,
+    DEVICE_CLASS_SIGNAL_STRENGTH,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+    STATE_CLASS_MEASUREMENT,
+    UNIT_DECIBEL_MILLIWATT,
+)
+
+AUTO_LOAD = ["sensor"]
 
 CODEOWNERS = ["@olliemaller"]
 
@@ -16,6 +27,11 @@ SendAction = aok_ns.class_("SendAction", automation.Action, cg.Parented.template
 FrameTrigger = aok_ns.class_(
     "FrameTrigger", automation.Trigger.template(cg.std_string, cg.uint16, cg.bool_)
 )
+LongPressTrigger = aok_ns.class_(
+    "LongPressTrigger", automation.Trigger.template(cg.std_string, cg.uint16, cg.float_)
+)
+PairAction = aok_ns.class_("PairAction", automation.Action, cg.Parented.template(AokRf))
+ScanAction = aok_ns.class_("ScanAction", automation.Action, cg.Parented.template(AokRf))
 
 CONF_SCK_PIN = "sck_pin"
 CONF_MISO_PIN = "miso_pin"
@@ -34,6 +50,14 @@ CONF_REPEATS = "repeats"
 CONF_ON_FRAME = "on_frame"
 CONF_CHANNELS = "channels"
 CONF_ACTION = "action"
+CONF_PROGRAM = "program"
+CONF_EXTRA_REMOTES = "extra_remotes"
+CONF_OWN_ID = "own_id"
+CONF_OWN_CHANNELS = "own_channels"
+CONF_REPEAT_REMOTE = "repeat_remote"
+CONF_RSSI = "rssi"
+CONF_ON_LONG_PRESS = "on_long_press"
+CONF_PRESSED_P = "pressed_p"
 
 ACTIONS = {"up": 0, "down": 1, "stop": 2}
 
@@ -47,8 +71,24 @@ REMOTE_SCHEMA = cv.Schema(
         cv.Required(CONF_UP): hex16,
         cv.Required(CONF_DOWN): hex16,
         cv.Required(CONF_STOP): hex16,
+        cv.Optional(CONF_PROGRAM): hex16,
     }
 )
+
+EXTRA_REMOTE_SCHEMA = cv.Schema(
+    {
+        cv.Required(CONF_PREFIX): cv.All(cv.hex_int, cv.int_range(min=0, max=0xFFFFFF)),
+        cv.Required(CONF_REMOTE_ID): cv.All(cv.hex_int, cv.int_range(min=0, max=0xFF)),
+    }
+)
+
+
+def channel_mask(value):
+    channels = cv.ensure_list(cv.int_range(min=1, max=16))(value)
+    mask = 0
+    for c in channels:
+        mask |= 1 << (c - 1)
+    return mask
 
 CONFIG_SCHEMA = cv.Schema(
     {
@@ -65,6 +105,20 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_TX_POWER, default=10): cv.int_range(min=-30, max=12),
         cv.Optional(CONF_REPEATS, default=8): cv.int_range(min=1, max=20),
         cv.Optional(CONF_REMOTE): REMOTE_SCHEMA,
+        cv.Optional(CONF_EXTRA_REMOTES): cv.ensure_list(EXTRA_REMOTE_SCHEMA),
+        cv.Optional(CONF_OWN_ID): cv.All(cv.hex_int, cv.int_range(min=1, max=0xFF)),
+        cv.Optional(CONF_OWN_CHANNELS): channel_mask,
+        cv.Optional(CONF_REPEAT_REMOTE, default=False): cv.boolean,
+        cv.Optional(CONF_RSSI): sensor.sensor_schema(
+            unit_of_measurement=UNIT_DECIBEL_MILLIWATT,
+            accuracy_decimals=0,
+            device_class=DEVICE_CLASS_SIGNAL_STRENGTH,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_ON_LONG_PRESS): automation.validate_automation(
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(LongPressTrigger)}
+        ),
         cv.Optional(CONF_ON_FRAME): automation.validate_automation(
             {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(FrameTrigger)}
         ),
@@ -91,6 +145,25 @@ async def to_code(config):
     if CONF_REMOTE in config:
         r = config[CONF_REMOTE]
         cg.add(var.set_remote(r[CONF_PREFIX], r[CONF_REMOTE_ID], r[CONF_UP], r[CONF_DOWN], r[CONF_STOP]))
+        if CONF_PROGRAM in r:
+            cg.add(var.set_program(r[CONF_PROGRAM]))
+    for extra in config.get(CONF_EXTRA_REMOTES, []):
+        cg.add(var.add_extra_remote(extra[CONF_PREFIX], extra[CONF_REMOTE_ID]))
+    if CONF_OWN_ID in config:
+        cg.add(var.set_own_id(config[CONF_OWN_ID]))
+    if CONF_OWN_CHANNELS in config:
+        cg.add(var.set_own_channels(config[CONF_OWN_CHANNELS]))
+    cg.add(var.set_repeat_remote(config[CONF_REPEAT_REMOTE]))
+    if CONF_RSSI in config:
+        sens = await sensor.new_sensor(config[CONF_RSSI])
+        cg.add(var.set_rssi_sensor(sens))
+    for conf in config.get(CONF_ON_LONG_PRESS, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(
+            trigger,
+            [(cg.std_string, "action"), (cg.uint16, "channels"), (cg.float_, "seconds")],
+            conf,
+        )
     for conf in config.get(CONF_ON_FRAME, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(
@@ -106,13 +179,6 @@ async def to_code(config):
     )
 
 
-def channel_mask(value):
-    channels = cv.ensure_list(cv.int_range(min=1, max=16))(value)
-    mask = 0
-    for c in channels:
-        mask |= 1 << (c - 1)
-    return mask
-
 
 @automation.register_action(
     "aok_rf.send",
@@ -124,10 +190,45 @@ def channel_mask(value):
             cv.Required(CONF_ACTION): cv.enum(ACTIONS, lower=True),
         }
     ),
+    synchronous=True,
 )
 async def send_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_ID])
     cg.add(var.set_mask(config[CONF_CHANNELS]))
     cg.add(var.set_action(config[CONF_ACTION]))
+    return var
+
+
+@automation.register_action(
+    "aok_rf.pair",
+    PairAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(AokRf),
+            cv.Required(CONF_CHANNELS): channel_mask,
+            cv.Optional(CONF_PRESSED_P, default=False): cv.boolean,
+        }
+    ),
+    synchronous=True,
+)
+async def pair_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    cg.add(var.set_mask(config[CONF_CHANNELS]))
+    cg.add(var.set_pressed(config[CONF_PRESSED_P]))
+    return var
+
+
+@automation.register_action(
+    "aok_rf.frequency_scan",
+    ScanAction,
+    cv.maybe_simple_value(
+        {cv.GenerateID(): cv.use_id(AokRf)}, key=CONF_ID
+    ),
+    synchronous=True,
+)
+async def scan_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
     return var

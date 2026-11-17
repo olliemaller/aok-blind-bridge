@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### ESPHome component
+- `aok_rf` now has the bridge's radio features: `extra_remotes`, `on_long_press`, an `rssi:` sensor, `repeat_remote`, `aok_rf.frequency_scan`, and pairing to the component's own ID (`own_id`, `own_channels`, `aok_rf.pair`, `program:` in `remote:`).
+- New `esphome/full-example.yaml` doing scenes, schedules with sunrise/sunset, named positions, a lock, a window interlock and wind protection in YAML. CI checks and compiles it. The table at the end of `docs/esphome.md` maps each bridge feature to its ESPHome version.
+
 ## [1.6.0] - 2026-11-17
 
 ### Added
