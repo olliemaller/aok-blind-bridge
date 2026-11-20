@@ -2,7 +2,7 @@
 
 ## 1. Flash
 
-Use the [web installer](https://olliemaller.github.io/aok-blind-bridge/) (Chrome or Edge on a computer). It flashes the firmware, then asks for your Wi-Fi over USB. If the installer can't connect, hold **BOOT** on the ESP32 while you press Install.
+Use the [web installer](https://blinds.maller.com.au/) (Chrome or Edge on a computer). It flashes the firmware, then asks for your Wi-Fi over USB. If the installer can't connect, hold **BOOT** on the ESP32 while you press Install.
 
 If you skip the Wi-Fi step, the bridge opens a setup network called **AOK-Blinds-xxxx**. Join it and the setup page opens. If it doesn't, browse to `http://192.168.4.1`. Then go to **Settings → Wi-Fi**, press **Scan**, pick your network and save. The bridge restarts and joins it.
 

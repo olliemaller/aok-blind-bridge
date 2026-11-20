@@ -68,7 +68,7 @@ jobs:
         run: |
           v=${{ matrix.rel.tag }}; v=${v#v}
           awk -v v="$v" '$0 ~ "^## \\[?"v"\\]?" {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
-          printf '\n---\n**Install:** flash `aok-blind-bridge-%s-factory.bin` at 0x0 from the [web installer](https://olliemaller.github.io/aok-blind-bridge/) or esptool. **Update:** upload `aok-blind-bridge-%s-ota.bin` in the bridge'"'"'s Settings, or use *Check for updates*.\n' "$v" "$v" >> notes.md
+          printf '\n---\n**Install:** flash `aok-blind-bridge-%s-factory.bin` at 0x0 from the [web installer](https://blinds.maller.com.au/) or esptool. **Update:** upload `aok-blind-bridge-%s-ota.bin` in the bridge'"'"'s Settings, or use *Check for updates*.\n' "$v" "$v" >> notes.md
           cat notes.md
       - name: Publish
         env:

@@ -6,7 +6,7 @@
 
 Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an ESP32 and a CC1101 radio module (about A$15 of parts). Motorised blinds sold as **Motolux**, and under other brands, use these motors with remotes such as the AC127. No cloud, no Tuya hub and no app.
 
-**[Install it from your browser →](https://olliemaller.github.io/aok-blind-bridge/)**
+**[Install it from your browser →](https://blinds.maller.com.au/)**
 
 <p align="center"><img src="docs/images/dashboard.png" alt="The bridge's dashboard" width="760"></p>
 
@@ -58,7 +58,7 @@ GPIO 12 is an ESP32 boot-strap pin. If the board won't start with the radio conn
 
 ## Install
 
-1. Open **[the web installer](https://olliemaller.github.io/aok-blind-bridge/)** in Chrome or Edge.
+1. Open **[the web installer](https://blinds.maller.com.au/)** in Chrome or Edge.
 2. Plug in the ESP32 and press **Install**. Enter your Wi-Fi when it asks.
 
 To flash by hand, download `aok-blind-bridge-<version>-factory.bin` from [Releases](https://github.com/olliemaller/aok-blind-bridge/releases/latest). Write it at address `0x0` with [esptool-js](https://espressif.github.io/esptool-js/) or `esptool.py write_flash 0x0 …`. If the board has no Wi-Fi set, it opens a setup network called **AOK-Blinds-xxxx**.
