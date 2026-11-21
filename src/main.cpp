@@ -28,9 +28,10 @@
 #include <stdarg.h>
 
 #include "aok_protocol.h"
+#include "somfy_rts.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.6.0"
+#define FW_VERSION "1.7.0"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -71,7 +72,11 @@ struct Pins {
   int gdo0 = DEFAULT_PIN_GDO0, gdo2 = DEFAULT_PIN_GDO2, led = DEFAULT_PIN_LED;
   float mhz = 433.92f;
   int paDbm = 10;
+  int rxBw = 0;  // receive bandwidth in kHz; 0 = automatic (wide enough for Somfy at 433.42 MHz too, when any are set up)
 };
+
+constexpr float kSomfyMhz = 433.42f;
+constexpr size_t kSomfyRemotes = 3;
 
 struct NetCfg {
   String ssid, pass, hostname = "aok-blinds", adminPass;
@@ -115,7 +120,12 @@ struct BlindCfg {
   bool invert = false;
   String presetName[4];             // named positions ("Half", "Privacy"...)
   int presetPos[4] = {-1, -1, -1, -1};
-  int favourite = -1;
+  int favourite = -1;                // A-OK: favourite position. Somfy: the motor's "My" position, if known
+  // Somfy RTS motors are addressed one by one (no channels): mask is 0 for them.
+  bool somfy = false;
+  uint32_t somfyAddr = 0;            // the bridge's own remote address for this motor
+  uint32_t somfyRemote[kSomfyRemotes] = {0, 0, 0};  // hand remotes (Situo, Telis...) the bridge follows
+  uint8_t somfyRemoteCount = 0;
 };
 
 struct BlindState {
@@ -143,6 +153,8 @@ struct HeardFrame {
   bool matched = false;
   uint16_t repeats = 1;
   int16_t rssi = 0;  // signal strength of the frame, dBm
+  bool somfy = false;                // Somfy RTS frame: the fields below, not f (f.payload is the raw frame)
+  somfy::Frame s;
 };
 
 // ---- automation: scenes and schedules (saved together as "auto")
@@ -237,6 +249,14 @@ volatile uint16_t ringHead = 0, ringTail = 0;
 volatile uint32_t lastEdgeUs = 0, ringOverflow = 0;
 volatile int rxPin = -1;
 aok::Decoder decoder;
+somfy::Decoder somfyDecoder;
+float rxMhzNow = 0, rxBwNow = 0;     // what the receiver is tuned to right now
+int somfyLearn = -1;                 // blind listening for a Somfy hand remote
+uint32_t somfyLearnMs = 0;
+String somfyStatus = "idle";
+uint32_t lastSomfyAddr = 0;          // de-duplicates the repeats of one press (same address and rolling code)
+uint16_t lastSomfyCode = 0;
+uint32_t lastSomfyMs = 0;
 
 // ---------------------------------------------------------------- helpers
 #ifdef USE_ETH
@@ -302,6 +322,12 @@ void ledSet(bool on) { if (pins.led >= 0) digitalWrite(pins.led, on ? HIGH : LOW
 
 time_t wallClock() { const time_t t = time(nullptr); return t > 1700000000 ? t : 0; }
 
+bool isSomfy(size_t i) { return cfg[i].somfy; }
+bool anySomfy() { for (size_t i = 0; i < blindCount; ++i) if (cfg[i].somfy) return true; return false; }
+// A-OK blind j moves with a frame sent on `mask` (all of its channels are in it). Somfy blinds never do.
+bool inMask(size_t j, uint16_t mask) { return !cfg[j].somfy && (cfg[j].mask & ~mask) == 0; }
+bool isGroup(size_t i) { return !cfg[i].somfy && __builtin_popcount(cfg[i].mask) > 1; }
+
 void logf(char level, const char* fmt, ...) {
   char buf[220];
   va_list ap;
@@ -357,6 +383,7 @@ void savePins() {
   JsonDocument d;
   d["sck"] = pins.sck; d["miso"] = pins.miso; d["mosi"] = pins.mosi; d["cs"] = pins.cs;
   d["gdo0"] = pins.gdo0; d["gdo2"] = pins.gdo2; d["led"] = pins.led; d["mhz"] = pins.mhz; d["pa"] = pins.paDbm;
+  d["rx_bw"] = pins.rxBw;
   String s; serializeJson(d, s); prefs.putString("pins", s);
 }
 
@@ -366,6 +393,7 @@ void loadPins() {
   pins.sck = d["sck"] | pins.sck; pins.miso = d["miso"] | pins.miso; pins.mosi = d["mosi"] | pins.mosi;
   pins.cs = d["cs"] | pins.cs; pins.gdo0 = d["gdo0"] | pins.gdo0; pins.gdo2 = d["gdo2"] | pins.gdo2;
   pins.led = d["led"] | pins.led; pins.mhz = d["mhz"] | pins.mhz; pins.paDbm = d["pa"] | pins.paDbm;
+  pins.rxBw = d["rx_bw"] | pins.rxBw;
 }
 
 uint16_t parseChannels(const String& text);
@@ -444,6 +472,38 @@ void loadRemote() {
   remoteFromJson(d.as<JsonObjectConst>());
 }
 
+// Somfy rolling codes live in their own keys ("rc" + address), written before every send so a
+// restart can never make the bridge reuse a code the motor has already seen.
+String rcKey(uint32_t addr) { return String("rc") + hex(addr, 6); }
+uint16_t somfyCode(uint32_t addr) { return prefs.getUShort(rcKey(addr).c_str(), 1); }
+void setSomfyCode(uint32_t addr, uint16_t code) { prefs.putUShort(rcKey(addr).c_str(), code); }
+// Only ever moves the code forward (restoring an old backup mustn't wind it back).
+void raiseSomfyCode(uint32_t addr, uint16_t code) { if (code > somfyCode(addr)) setSomfyCode(addr, code); }
+
+uint32_t parseHex24(const String& t) {
+  if (!t.length() || t.length() > 6) return 0;
+  for (char c : t) if (!isxdigit(static_cast<unsigned char>(c))) return 0;
+  return strtoul(t.c_str(), nullptr, 16) & 0xFFFFFF;
+}
+
+// A fresh address for a new Somfy blind: from this ESP32's MAC, then a counter that only goes up,
+// so a deleted blind's address (which its motor may still know) is never handed out again.
+uint32_t newSomfyAddress(const BlindCfg* list, size_t n) {
+  uint8_t mac[6]; WiFi.macAddress(mac);
+  const uint32_t base = (static_cast<uint32_t>(mac[3]) << 16) | (static_cast<uint32_t>(mac[4]) << 8) | mac[5];
+  uint32_t next = prefs.getUInt("somfynext", 1);
+  for (;;) {
+    const uint32_t a = (base + next * 0x10101u) & 0xFFFFFF;
+    next++;
+    bool used = a == 0;
+    for (size_t k = 0; k < n && !used; ++k) {
+      used |= list[k].somfyAddr == a;
+      for (uint8_t r = 0; r < list[k].somfyRemoteCount; ++r) used |= list[k].somfyRemote[r] == a;
+    }
+    if (!used) { prefs.putUInt("somfynext", next); return a; }
+  }
+}
+
 void blindToJson(size_t i, JsonObject o) {
   o["id"] = cfg[i].id; o["name"] = cfg[i].name; o["channels"] = maskText(cfg[i].mask);
   o["open_ms"] = cfg[i].openMs; o["close_ms"] = cfg[i].closeMs; o["invert"] = cfg[i].invert;
@@ -456,6 +516,13 @@ void blindToJson(size_t i, JsonObject o) {
     x["name"] = cfg[i].presetName[k]; x["position"] = cfg[i].presetPos[k];
   }
   o["favourite"] = cfg[i].favourite; o["device_class"] = cfg[i].deviceClass; o["room"] = cfg[i].room;
+  o["type"] = cfg[i].somfy ? "somfy" : "aok";
+  if (cfg[i].somfy) {
+    o["somfy_address"] = hex(cfg[i].somfyAddr, 6);
+    o["somfy_code"] = somfyCode(cfg[i].somfyAddr);
+    JsonArray r = o["somfy_remotes"].to<JsonArray>();
+    for (uint8_t k = 0; k < cfg[i].somfyRemoteCount; ++k) r.add(hex(cfg[i].somfyRemote[k], 6));
+  }
 }
 
 uint16_t parseChannels(const String& text) {
@@ -481,8 +548,22 @@ bool blindsFromJson(JsonArrayConst arr, String& err) {
     if (!b.id.length()) b.id = slug(b.name);
     b.id = slug(b.id);
     for (size_t k = 0; k < n; ++k) if (next[k].id == b.id) { b.id += "_"; b.id += n; }
-    b.mask = o["channels"].is<const char*>() ? parseChannels(o["channels"].as<String>()) : (o["mask"] | 0);
-    if (!b.mask) { err = b.name + ": choose at least one channel (1-16)"; return false; }
+    b.somfy = String(o["type"] | "aok") == "somfy";
+    if (b.somfy) {
+      b.mask = 0;
+      b.somfyAddr = parseHex24(o["somfy_address"] | "");
+      if (!b.somfyAddr) {  // keep the address of a blind that's being edited, or make a new one
+        const int old = findBlind(b.id);
+        if (old >= 0 && cfg[old].somfy) b.somfyAddr = cfg[old].somfyAddr;
+      }
+      for (JsonVariantConst v : o["somfy_remotes"].as<JsonArrayConst>()) {
+        const uint32_t a = parseHex24(v.as<String>());
+        if (a && b.somfyRemoteCount < kSomfyRemotes) b.somfyRemote[b.somfyRemoteCount++] = a;
+      }
+    } else {
+      b.mask = o["channels"].is<const char*>() ? parseChannels(o["channels"].as<String>()) : (o["mask"] | 0);
+      if (!b.mask) { err = b.name + ": choose at least one channel (1-16)"; return false; }
+    }
     b.openMs = constrain(static_cast<uint32_t>(o["open_ms"] | 30000), 1000u, 300000u);
     b.closeMs = constrain(static_cast<uint32_t>(o["close_ms"] | 30000), 1000u, 300000u);
     b.invert = o["invert"] | false;
@@ -503,7 +584,21 @@ bool blindsFromJson(JsonArrayConst arr, String& err) {
     b.deviceClass = o["device_class"] | "shade";
     b.room = o["room"] | "";
     b.room.trim();
+    if (b.somfy) {
+      b.tiltMs = 0;
+      for (size_t k = 0; k < n; ++k)
+        if (next[k].somfy && b.somfyAddr && next[k].somfyAddr == b.somfyAddr) { err = b.name + ": same Somfy address as " + next[k].name; return false; }
+    }
     next[n++] = b;
+  }
+  for (size_t i = 0; i < n; ++i) {
+    if (next[i].somfy && !next[i].somfyAddr) next[i].somfyAddr = newSomfyAddress(next, n);
+  }
+  // rolling codes from a backup (or the page) only ever move a code forward
+  size_t idx = 0;
+  for (JsonObjectConst o : arr) {
+    if (idx < n && next[idx].somfy && o["somfy_code"].is<int>()) raiseSomfyCode(next[idx].somfyAddr, o["somfy_code"].as<uint16_t>());
+    idx++;
   }
   // keep runtime state for blinds that still exist
   BlindState nextState[kMaxBlinds];
@@ -593,10 +688,19 @@ void IRAM_ATTR onEdge() {
   ringHead = next;
 }
 
+// With Somfy blinds set up, one receiver hears both 433.42 and the A-OK frequency: it sits half
+// way between them with a bandwidth wide enough for both. Otherwise it stays narrow on pins.mhz.
+float rxMhz() { return anySomfy() ? (pins.mhz + kSomfyMhz) / 2.0f : pins.mhz; }
+float rxBw() { return pins.rxBw > 0 ? static_cast<float>(pins.rxBw) : (anySomfy() ? 812.0f : 270.0f); }
+
 void rxStart() {
   if (!radioReady) return;
-  ELECHOUSE_cc1101.SetRx(pins.mhz);
+  const float bw = rxBw();
+  if (bw != rxBwNow) { ELECHOUSE_cc1101.setRxBW(bw); rxBwNow = bw; }
+  rxMhzNow = rxMhz();
+  ELECHOUSE_cc1101.SetRx(rxMhzNow);
   decoder.clear();
+  somfyDecoder.clear();
   rxPin = pins.gdo2;
   pinMode(pins.gdo2, INPUT);
   lastEdgeUs = micros();
@@ -618,16 +722,17 @@ void setupRadio() {
   ELECHOUSE_cc1101.setModulation(2);   // ASK/OOK
   ELECHOUSE_cc1101.setMHZ(pins.mhz);
   ELECHOUSE_cc1101.setPA(pins.paDbm);
-  ELECHOUSE_cc1101.setRxBW(270.0f);
   ELECHOUSE_cc1101.setDRate(4.8f);
+  rxBwNow = 0;  // rxStart() sets the bandwidth
   ELECHOUSE_cc1101.setSyncMode(0);
   ELECHOUSE_cc1101.setCrc(false);
   ELECHOUSE_cc1101.setPktFormat(3);
   // GDO2 = received data out; GDO0 = high impedance in RX (it becomes the TX data input when transmitting)
   ELECHOUSE_cc1101.SpiWriteReg(0x00, 0x0D);  // IOCFG2
   ELECHOUSE_cc1101.SpiWriteReg(0x02, 0x2E);  // IOCFG0
-  LOGI("CC1101 radio ready at %.2f MHz", pins.mhz);
   rxStart();
+  if (anySomfy()) LOGI("CC1101 radio ready: listening at %.2f MHz (%.0f kHz wide) for A-OK on %.2f and Somfy on %.2f", rxMhzNow, rxBwNow, pins.mhz, kSomfyMhz);
+  else LOGI("CC1101 radio ready at %.2f MHz", pins.mhz);
 }
 
 bool transmitPayload(uint64_t payload, String& err) {
@@ -669,6 +774,50 @@ bool sendAction(uint16_t mask, aok::Action action, String& err) {
     if (!transmitPayload(aok::makePayload(remote.prefix, remote.ownId, own, remote.base[a]), err)) return false;
   }
   return true;
+}
+
+// Send one Somfy RTS command from blind i's own address. The rolling code goes up and is saved
+// first, so a crash mid-send can't reuse it. `frames` counts the first frame and its repeats.
+bool sendSomfy(size_t i, somfy::Command cmd, uint8_t frames, String& err) {
+  if (!radioReady) { err = "CC1101 radio not detected"; return false; }
+  const uint32_t addr = cfg[i].somfyAddr;
+  const uint16_t code = somfyCode(addr);
+  setSomfyCode(addr, static_cast<uint16_t>(code + 1));
+  uint8_t frame[7];
+  somfy::encode(cmd, code, addr, frame);
+  uint32_t pulses[somfy::kMaxPulses];
+  rxStop();
+  ELECHOUSE_cc1101.SetTx(kSomfyMhz);
+  pinMode(pins.gdo0, OUTPUT);
+  ledSet(true);
+  for (uint8_t r = 0; r < frames; ++r) {
+    const size_t n = somfy::encodePulses(frame, r == 0, pulses, somfy::kMaxPulses);
+    bool level = true;
+    for (size_t k = 0; k < n; ++k) {
+      digitalWrite(pins.gdo0, level ? HIGH : LOW);
+      if (pulses[k] > 16000) delay(pulses[k] / 1000), delayMicroseconds(pulses[k] % 1000);
+      else delayMicroseconds(pulses[k]);
+      level = !level;
+    }
+    digitalWrite(pins.gdo0, LOW);
+  }
+  ledSet(false);
+  lastTxMs = millis();
+  rxStart();
+  stateRev++;
+  LOGI("%s: sent Somfy %s (address %s, code %u)", cfg[i].name.c_str(), somfy::commandName(cmd), hex(addr, 6).c_str(), code);
+  return true;
+}
+
+somfy::Command somfyFor(aok::Action a) {
+  return a == aok::Action::Open ? somfy::Command::Up : a == aok::Action::Close ? somfy::Command::Down : somfy::Command::My;
+}
+
+// Send an Up/Down/Stop for one blind, whichever kind it is. For Somfy, Stop is "My", which only
+// stops a motor that is moving: callers make sure of that (a stopped motor would go to its My position).
+bool blindSend(size_t i, aok::Action a, String& err) {
+  if (cfg[i].somfy) return sendSomfy(i, somfyFor(a), 4, err);
+  return sendAction(cfg[i].mask, a, err);
 }
 
 // ---------------------------------------------------------------- position model
@@ -725,18 +874,33 @@ void haltMotion(size_t i, const String& source) {
 }
 
 // Apply an RF action heard or sent on `mask` to every blind whose channels are all included.
+void applyOne(size_t j, aok::Action action, const String& source, bool commander, int commanderTarget) {
+  if (action == aok::Action::Stop) { haltMotion(j, source); return; }
+  const Motion m = motionFor(j, action);
+  if (commander && commanderTarget > 0 && commanderTarget < 100)
+    beginMotion(j, m, commanderTarget, true, source);
+  else
+    beginMotion(j, m, m == Motion::Opening ? 100 : 0, false, source);
+}
+
 void applyAction(uint16_t mask, aok::Action action, const String& source, int commander, int commanderTarget) {
   for (size_t j = 0; j < blindCount; ++j) {
-    if ((cfg[j].mask & ~mask) != 0) continue;
-    if (action == aok::Action::Stop) { haltMotion(j, source); continue; }
-    const Motion m = motionFor(j, action);
-    if (static_cast<int>(j) == commander && commanderTarget > 0 && commanderTarget < 100)
-      beginMotion(j, m, commanderTarget, true, source);
-    else
-      beginMotion(j, m, m == Motion::Opening ? 100 : 0, false, source);
+    if (!inMask(j, mask)) continue;
+    applyOne(j, action, source, static_cast<int>(j) == commander, commanderTarget);
   }
   requestPositionSave();
 }
+
+// What a frame sent for blind i does to the position model: A-OK frames move every blind on
+// those channels; a Somfy frame moves just that motor.
+void blindApply(size_t i, aok::Action action, const String& source, int commanderTarget) {
+  if (!cfg[i].somfy) { applyAction(cfg[i].mask, action, source, static_cast<int>(i), commanderTarget); return; }
+  applyOne(i, action, source, true, commanderTarget);
+  requestPositionSave();
+}
+
+// Blinds that can stop part way: A-OK needs the learned Stop button; Somfy uses My.
+bool canStop(size_t i) { return cfg[i].somfy || remote.have[2]; }
 
 bool groupPosition(size_t g, int& pos, Motion& motion);
 bool stopBlind(size_t i, const String& source, String& err);
@@ -748,14 +912,14 @@ bool moveTo(size_t i, int target, const String& source, String& err) {
     if (now < 0 || target < now) { err = "the window or door is open: it won't close until it's shut"; return false; }
   }
   int gp; Motion gm;
-  if (__builtin_popcount(cfg[i].mask) > 1 && groupPosition(i, gp, gm) && gm == Motion::Stopped && st[i].motion == Motion::Stopped) {
+  if (isGroup(i) && groupPosition(i, gp, gm) && gm == Motion::Stopped && st[i].motion == Motion::Stopped) {
     st[i].position = st[i].startPos = gp;  // a group starts from where its members actually are
   }
   int cur = estimate(i);
   st[i].after = -1;
   if (cur < 0 && target > 0 && target < 100) {
     // Position unknown: run to the nearer end first (a reference run), then on to the target.
-    if (!remote.have[2]) { err = "learn the Stop button first"; return false; }
+    if (!canStop(i)) { err = "learn the Stop button first"; return false; }
     const int end = target >= 50 ? 100 : 0;
     if (!moveTo(i, end, source, err)) return false;
     st[i].after = target;
@@ -777,17 +941,35 @@ bool moveTo(size_t i, int target, const String& source, String& err) {
   st[i].pending = -1;
   if (cur < 0) cur = target == 100 ? 0 : 100;
   const Motion m = target > cur ? Motion::Opening : Motion::Closing;
-  if (target > 0 && target < 100 && !remote.have[2]) { err = "learn the Stop button first"; return false; }
-  if (!sendAction(cfg[i].mask, rfFor(i, m), err)) return false;
-  applyAction(cfg[i].mask, rfFor(i, m), source, static_cast<int>(i), target);
+  if (target > 0 && target < 100 && !canStop(i)) { err = "learn the Stop button first"; return false; }
+  if (!blindSend(i, rfFor(i, m), err)) return false;
+  blindApply(i, rfFor(i, m), source, target);
   return true;
 }
 
 bool stopBlind(size_t i, const String& source, String& err) {
   st[i].pending = -1;
   st[i].after = -1;
-  if (!sendAction(cfg[i].mask, aok::Action::Stop, err)) return false;
-  applyAction(cfg[i].mask, aok::Action::Stop, source, static_cast<int>(i), -1);
+  if (cfg[i].somfy && st[i].motion == Motion::Stopped) {
+    // My on a motor that isn't moving sends it to its My position, so nothing is sent.
+    haltMotion(i, source);
+    return true;
+  }
+  if (!blindSend(i, aok::Action::Stop, err)) return false;
+  blindApply(i, aok::Action::Stop, source, -1);
+  return true;
+}
+
+// Somfy "My" position: the motor goes there by itself when it's stopped and gets My.
+bool somfyFavourite(size_t i, const String& source, String& err) {
+  if (st[i].motion != Motion::Stopped) return moveTo(i, cfg[i].favourite, source, err);
+  if (!sendSomfy(i, somfy::Command::My, 4, err)) return false;
+  int cur = estimate(i);
+  if (cur == cfg[i].favourite) return true;
+  if (cur < 0) cur = cfg[i].favourite >= 50 ? 0 : 100;
+  st[i].position = st[i].startPos = cur;
+  beginMotion(i, cfg[i].favourite > cur ? Motion::Opening : Motion::Closing, cfg[i].favourite, false, source);
+  requestPositionSave();
   return true;
 }
 
@@ -796,7 +978,7 @@ bool groupPosition(size_t g, int& pos, Motion& motion) {
   int sum = 0, count = 0;
   bool opening = false, closing = false;
   for (size_t j = 0; j < blindCount; ++j) {
-    if (j == g || (cfg[j].mask & ~cfg[g].mask) != 0 || cfg[j].mask == cfg[g].mask) continue;
+    if (j == g || !inMask(j, cfg[g].mask) || cfg[j].mask == cfg[g].mask) continue;
     const int p = estimate(j);
     if (p < 0) return false;
     sum += p; count++;
@@ -813,7 +995,7 @@ void displayState(size_t i, int& pos, Motion& motion) {
   pos = estimate(i);
   motion = st[i].motion;
   int gp; Motion gm;
-  if (__builtin_popcount(cfg[i].mask) > 1 && groupPosition(i, gp, gm)) { pos = gp; motion = gm; }
+  if (isGroup(i) && groupPosition(i, gp, gm)) { pos = gp; motion = gm; }
 }
 
 // ---------------------------------------------------------------- MQTT
@@ -873,7 +1055,7 @@ void publishDiscovery() {
       dev["identifiers"][0] = uid;
       dev["name"] = cfg[i].name;
       dev["via_device"] = nodeId();
-      dev["model"] = net.brand + " motor · channel " + maskText(cfg[i].mask);
+      dev["model"] = cfg[i].somfy ? String("Somfy RTS motor") : net.brand + " motor · channel " + maskText(cfg[i].mask);
       if (cfg[i].room.length()) dev["suggested_area"] = cfg[i].room;
       publishJson(disc + "/cover/" + uid + "/config", d);
     }
@@ -1009,7 +1191,8 @@ void publishBlind(size_t i) {
   mqtt.publish(blindTopic(i, "state").c_str(), state, true);
   if (pos >= 0) mqtt.publish(blindTopic(i, "position").c_str(), String(pos).c_str(), true);
   JsonDocument d;
-  d["channels"] = maskText(cfg[i].mask);
+  if (cfg[i].somfy) { d["protocol"] = "somfy_rts"; d["somfy_address"] = hex(cfg[i].somfyAddr, 6); }
+  else d["channels"] = maskText(cfg[i].mask);
   d["position_known"] = pos >= 0;
   d["target_position"] = st[i].target;
   d["last_source"] = st[i].lastSource;
@@ -1024,7 +1207,7 @@ void publishBlind(size_t i) {
   for (int k = 0; k < 4; ++k) if (cfg[i].presetPos[k] >= 0) pr.add(cfg[i].presetName[k] + " " + String(cfg[i].presetPos[k]) + "%");
   mqtt.publish(blindTopic(i, "lock").c_str(), st[i].locked ? "ON" : "OFF", true);
   if (cfg[i].tiltMs && st[i].tilt >= 0) mqtt.publish(blindTopic(i, "tilt").c_str(), String(st[i].tilt).c_str(), true);
-  mqtt.publish(blindTopic(i, "available").c_str(), (radioReady && remoteComplete()) ? "online" : "offline", true);
+  mqtt.publish(blindTopic(i, "available").c_str(), (radioReady && (cfg[i].somfy || remoteComplete())) ? "online" : "offline", true);
   publishJson(blindTopic(i, "attributes"), d);
   st[i].lastPublishMs = millis();
   st[i].dirty = false;
@@ -1059,7 +1242,20 @@ bool allBlinds(String cmd, const String& source, String& err) {
       if ((st[i].locked && source != "wind") || st[i].windLocked || (a == aok::Action::Close && st[i].interlock)) held |= cfg[i].mask;
   normal &= ~held; reversed &= ~held;
   if (held) LOGI("All blinds: leaving out channel %s (locked, wind or window open)", maskText(held).c_str());
-  if (!normal && !reversed) { err = held ? "every blind is locked or held" : "no blinds set up"; return false; }
+  // Somfy motors each get their own frame
+  bool somfyMoved = false, somfyHeld = false;
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (!cfg[i].somfy) continue;
+    if (a != aok::Action::Stop && ((st[i].locked && source != "wind") || st[i].windLocked || (a == aok::Action::Close && st[i].interlock))) { somfyHeld = true; continue; }
+    String e;
+    const bool ok = a == aok::Action::Stop ? stopBlind(i, source, e) : moveTo(i, a == aok::Action::Open ? 100 : 0, source, e);
+    if (ok) somfyMoved = true; else LOGW("%s: %s", cfg[i].name.c_str(), e.c_str());
+  }
+  if (!normal && !reversed) {
+    if (somfyMoved) { LOGI("All blinds: %s (%s)", cmd.c_str(), source.c_str()); return true; }
+    err = (held || somfyHeld) ? "every blind is locked or held" : "no blinds set up";
+    return false;
+  }
   const aok::Action flip = a == aok::Action::Open ? aok::Action::Close : a == aok::Action::Close ? aok::Action::Open : a;
   if (normal) { if (!sendAction(normal, a, err)) return false; applyAction(normal, a, source, -1, -1); }
   if (reversed) { if (!sendAction(reversed, flip, err)) return false; applyAction(reversed, flip, source, -1, -1); }
@@ -1181,12 +1377,13 @@ bool handleBlindCommand(size_t i, String cmd, const String& source, String& err)
   if (cmd == "STOP") return stopBlind(i, source, err);
   if (cmd == "FAVOURITE" || cmd == "FAVORITE") {
     if (cfg[i].favourite < 0) { err = "no favourite position set"; return false; }
+    if (cfg[i].somfy) return somfyFavourite(i, source, err);
     return moveTo(i, cfg[i].favourite, source, err);
   }
   if (cmd == "SYNC_OPEN" || cmd == "SYNC_CLOSE") {
     const int p = cmd == "SYNC_OPEN" ? 100 : 0;
     for (size_t j = 0; j < blindCount; ++j) {
-      if ((cfg[j].mask & ~cfg[i].mask) != 0) continue;
+      if (j != i && !inMask(j, cfg[i].mask)) continue;
       st[j].motion = Motion::Stopped;
       st[j].position = st[j].startPos = st[j].target = p;
       st[j].lastSource = "marked";
@@ -1227,8 +1424,8 @@ void updateMotion() {
     const int goal = s.target;
     if (s.autoStop) {
       String err;
-      if (sendAction(cfg[i].mask, aok::Action::Stop, err)) {
-        applyAction(cfg[i].mask, aok::Action::Stop, s.lastSource, static_cast<int>(i), -1);
+      if (blindSend(i, aok::Action::Stop, err)) {
+        blindApply(i, aok::Action::Stop, s.lastSource, -1);
         s.position = s.startPos = s.target = goal;
       } else {
         haltMotion(i, "auto_stop_failed");  // keep the time-based estimate
@@ -1249,9 +1446,9 @@ void updateMotion() {
   if (anyStopped) requestPositionSave();
   // groups follow their members
   for (size_t i = 0; i < blindCount; ++i) {
-    if (__builtin_popcount(cfg[i].mask) <= 1) continue;
+    if (!isGroup(i)) continue;
     for (size_t j = 0; j < blindCount; ++j)
-      if (j != i && (cfg[j].mask & ~cfg[i].mask) == 0 && st[j].dirty) { st[i].dirty = true; break; }
+      if (j != i && inMask(j, cfg[i].mask) && st[j].dirty) { st[i].dirty = true; break; }
   }
   for (size_t i = 0; i < blindCount; ++i) if (st[i].dirty) publishBlind(i);
 }
@@ -1317,7 +1514,7 @@ bool channelCommand(const String& payload, const String& source, String& err) {
                        : cmd == "STOP" ? aok::Action::Stop : aok::Action::Unknown;
   if (a == aok::Action::Unknown) { err = "command must be OPEN, CLOSE or STOP"; return false; }
   for (size_t i = 0; i < blindCount; ++i)
-    if ((cfg[i].mask & ~mask) == 0 && a != aok::Action::Stop && (st[i].locked || st[i].windLocked)) {
+    if (inMask(i, mask) && a != aok::Action::Stop && (st[i].locked || st[i].windLocked)) {
       err = cfg[i].name + " is locked"; return false;
     }
   if (!sendAction(mask, a, err)) return false;
@@ -1446,7 +1643,7 @@ void runSchedule(Schedule& s) {
     if (s.action == "OPEN" || s.action == "CLOSE" || s.action == "STOP") ok = allBlinds(s.action, "schedule", err);
     else {
       ok = false;
-      for (size_t i = 0; i < blindCount; ++i) if (__builtin_popcount(cfg[i].mask) == 1) { String e; ok |= handleBlindCommand(i, s.action, "schedule", e); }
+      for (size_t i = 0; i < blindCount; ++i) if (cfg[i].somfy || __builtin_popcount(cfg[i].mask) == 1) { String e; ok |= handleBlindCommand(i, s.action, "schedule", e); }
       if (!ok) err = "no blind could move";
     }
   } else {
@@ -1579,15 +1776,106 @@ void onPayload(uint64_t payload) {
   if (remote.listen) applyAction(f.mask, f.action, "hand_remote", -1, -1);
 }
 
+void recordSomfy(const somfy::Frame& sf, uint64_t raw, bool matched) {
+  HeardFrame& last = frames[(frameHead + kMaxFrames - 1) % kMaxFrames];
+  if (frameCount && last.somfy && last.s.address == sf.address && last.s.code == sf.code && millis() - last.ms < 3000) {
+    last.repeats++; last.ms = millis(); return;
+  }
+  stateRev++;
+  HeardFrame h;
+  h.ms = millis(); h.matched = matched; h.rssi = lastRssi; h.somfy = true; h.s = sf; h.f.payload = raw;
+  frames[frameHead] = h;
+  frameHead = (frameHead + 1) % kMaxFrames;
+  if (frameCount < kMaxFrames) frameCount++;
+}
+
+bool somfyFollows(size_t i, uint32_t addr) {
+  for (uint8_t k = 0; k < cfg[i].somfyRemoteCount; ++k) if (cfg[i].somfyRemote[k] == addr) return true;
+  return false;
+}
+
+// A Somfy hand remote press: learn it, or move the positions of the motors it controls.
+void onSomfy(const uint8_t raw[7]) {
+  somfy::Frame sf;
+  if (!somfy::decode(raw, sf)) return;
+  const uint32_t now = millis();
+  if (radioReady) lastRssi = static_cast<int16_t>(ELECHOUSE_cc1101.getRssi());
+  bool ours = false, matched = false;
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (!cfg[i].somfy) continue;
+    ours |= cfg[i].somfyAddr == sf.address;
+    matched |= somfyFollows(i, sf.address);
+  }
+  recordSomfy(sf, somfy::pack(raw), matched);
+  // a held button repeats the same rolling code: act on it once
+  const bool repeat = sf.address == lastSomfyAddr && sf.code == lastSomfyCode && now - lastSomfyMs < 3000;
+  lastSomfyAddr = sf.address; lastSomfyCode = sf.code; lastSomfyMs = now;
+  if (repeat || ours) return;
+  lastRxFlashMs = now;
+
+  if (somfyLearn >= 0 && somfyLearn < static_cast<int>(blindCount) && cfg[somfyLearn].somfy) {
+    BlindCfg& b = cfg[somfyLearn];
+    if (somfyFollows(somfyLearn, sf.address)) { somfyStatus = "that remote is already learned for " + b.name; return; }
+    if (b.somfyRemoteCount >= kSomfyRemotes) { somfyStatus = "already following 3 remotes: forget them first"; somfyLearn = -1; return; }
+    b.somfyRemote[b.somfyRemoteCount++] = sf.address;
+    saveBlinds();
+    somfyStatus = String("learned remote ") + hex(sf.address, 6) + " for " + b.name;
+    LOGI("Somfy: %s", somfyStatus.c_str());
+    somfyLearn = -1;
+    stateRev++;
+    return;
+  }
+  if (!matched) return;
+  const char* name = somfy::commandName(sf.command);
+  LOGI("Somfy remote %s: %s", hex(sf.address, 6).c_str(), name);
+  lastEventText = String("Somfy ") + name + " · " + hex(sf.address, 6);
+  if (mqtt.connected()) {
+    JsonDocument d;
+    d["event_type"] = sf.command == somfy::Command::Up ? "open" : sf.command == somfy::Command::Down ? "close" : "stop";
+    d["somfy_remote"] = hex(sf.address, 6);
+    d["somfy_command"] = name;
+    publishJson(topic("remote/event"), d, false);
+    mqtt.publish(topic("diag/last_remote").c_str(), lastEventText.c_str(), true);
+  }
+  if (!remote.listen) return;
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (!cfg[i].somfy || !somfyFollows(i, sf.address)) continue;
+    st[i].pending = -1; st[i].after = -1;
+    switch (sf.command) {
+      case somfy::Command::Up: applyOne(i, cfg[i].invert ? aok::Action::Close : aok::Action::Open, "hand_remote", false, -1); break;
+      case somfy::Command::Down: applyOne(i, cfg[i].invert ? aok::Action::Open : aok::Action::Close, "hand_remote", false, -1); break;
+      case somfy::Command::My:
+        if (st[i].motion != Motion::Stopped) haltMotion(i, "hand_remote");
+        else if (cfg[i].favourite >= 0) {  // stopped: the motor goes to its My position
+          int cur = estimate(i);
+          if (cur < 0) cur = cfg[i].favourite >= 50 ? 0 : 100;
+          if (cur != cfg[i].favourite) {
+            st[i].position = st[i].startPos = cur;
+            beginMotion(i, cfg[i].favourite > cur ? Motion::Opening : Motion::Closing, cfg[i].favourite, false, "hand_remote");
+          }
+        }
+        break;
+      default: break;
+    }
+  }
+  requestPositionSave();
+}
+
 void pollRadio() {
   uint64_t payload;
+  uint8_t sraw[7];
+  const bool listenSomfy = anySomfy();
   uint16_t budget = 512;
   while (ringTail != ringHead && budget--) {
     const uint32_t v = ring[ringTail];
     ringTail = (ringTail + 1) & (kRingSize - 1);
-    if (decoder.feed(v & 0x7FFFFFFF, (v & 0x80000000u) != 0, payload)) onPayload(payload);
+    const uint32_t us = v & 0x7FFFFFFF;
+    const bool high = (v & 0x80000000u) != 0;
+    if (decoder.feed(us, high, payload)) onPayload(payload);
+    if (listenSomfy && somfyDecoder.feed(us, high, sraw)) onSomfy(sraw);
   }
   if (learnMode && millis() - learnStartedMs > 120000) { learnMode = false; learnExtra = false; learnStatus = remoteComplete() ? "complete" : "timed out"; }
+  if (somfyLearn >= 0 && millis() - somfyLearnMs > 60000) { somfyLearn = -1; somfyStatus = "timed out: no Somfy remote heard"; stateRev++; }
 }
 
 // ---------------------------------------------------------------- web
@@ -1663,7 +1951,7 @@ void buildState(JsonDocument& d, bool lite) {
     blindToJson(i, o);
     int pos; Motion mo; displayState(i, pos, mo);
     o["position"] = pos; o["motion"] = motionName(mo); o["target"] = st[i].target; o["source"] = st[i].lastSource;
-    o["group"] = __builtin_popcount(cfg[i].mask) > 1;
+    o["group"] = isGroup(i);
     o["locked"] = st[i].locked; o["window_open"] = st[i].interlock; o["wind"] = st[i].windLocked;
     if (mo != Motion::Stopped && pos >= 0) {
       // lets the page animate smoothly between polls: % per second and where the run ends
@@ -1676,6 +1964,15 @@ void buildState(JsonDocument& d, bool lite) {
   for (size_t k = 0; k < frameCount; ++k) {
     const HeardFrame& h = frames[(frameHead + kMaxFrames - 1 - k) % kMaxFrames];
     JsonObject o = fr.add<JsonObject>();
+    if (h.somfy) {
+      o["protocol"] = "somfy"; o["ago_s"] = (millis() - h.ms) / 1000; o["payload"] = hex(h.f.payload, 14);
+      o["address"] = hex(h.s.address, 6); o["rolling_code"] = h.s.code; o["action"] = somfy::commandName(h.s.command);
+      o["matched"] = h.matched; o["repeats"] = h.repeats; o["kind"] = somfy::commandName(h.s.command);
+      if (h.rssi) o["rssi"] = h.rssi;
+      if (wallClock()) o["when"] = static_cast<uint32_t>(wallClock() - (millis() - h.ms) / 1000);
+      continue;
+    }
+    o["protocol"] = "aok";
     o["ago_s"] = (millis() - h.ms) / 1000; o["payload"] = hex(h.f.payload, 16); o["remote_id"] = hex(h.f.remoteId, 2);
     o["prefix"] = hex(h.f.prefix, 6); o["channels"] = maskText(h.f.mask); o["action"] = aok::actionName(h.f.action);
     o["matched"] = h.matched; o["repeats"] = h.repeats; o["kind"] = frameKind(h.f);
@@ -1698,6 +1995,11 @@ void buildState(JsonDocument& d, bool lite) {
   if (calIndex >= 0) { c["id"] = cfg[calIndex].id; c["name"] = cfg[calIndex].name; c["direction"] = motionName(calMotion); c["elapsed_ms"] = millis() - calStartMs; }
   JsonObject pr = d["pairing"].to<JsonObject>();
   pr["channel"] = pairChannel; pr["status"] = pairStatus;
+  JsonObject so = d["somfy"].to<JsonObject>();
+  so["status"] = somfyStatus;
+  so["learning"] = somfyLearn >= 0 ? cfg[somfyLearn].id : "";
+  so["mhz"] = kSomfyMhz;
+  r["rx_mhz"] = rxMhzNow; r["rx_bw"] = rxBwNow;
   d["live"] = true;  // this firmware pushes the state over a WebSocket on port 81
 #ifdef USE_ETH
   d["build"] = "eth";
@@ -1733,7 +2035,7 @@ void handleConfigGet() {
   n["brand"] = net.brand; n["tz"] = net.tz; n["tz_name"] = net.tzName;
   JsonObject p = d["pins"].to<JsonObject>();
   p["sck"] = pins.sck; p["miso"] = pins.miso; p["mosi"] = pins.mosi; p["cs"] = pins.cs;
-  p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm;
+  p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm; p["rx_bw"] = pins.rxBw;
   remoteToJson(d["remote"].to<JsonObject>());
   JsonArray b = d["blinds"].to<JsonArray>();
   for (size_t i = 0; i < blindCount; ++i) blindToJson(i, b.add<JsonObject>());
@@ -1775,6 +2077,7 @@ void handlePinsPost() {
   pins.sck = d["sck"] | pins.sck; pins.miso = d["miso"] | pins.miso; pins.mosi = d["mosi"] | pins.mosi;
   pins.cs = d["cs"] | pins.cs; pins.gdo0 = d["gdo0"] | pins.gdo0; pins.gdo2 = d["gdo2"] | pins.gdo2;
   pins.led = d["led"] | pins.led; pins.mhz = d["mhz"] | pins.mhz; pins.paDbm = d["pa_dbm"] | pins.paDbm;
+  pins.rxBw = constrain(static_cast<int>(d["rx_bw"] | pins.rxBw), 0, 812);
   savePins();
   scheduleReboot(1500);
   JsonDocument r; r["ok"] = true; r["rebooting"] = true; sendJson(r);
@@ -1798,11 +2101,13 @@ void handleBlindsPost() {
   if (!authed()) return;
   JsonDocument d; if (!bodyJson(d)) return;
   String err;
+  const bool hadSomfy = anySomfy();
   if (!blindsFromJson(d["blinds"].as<JsonArrayConst>(), err)) { sendError(err); return; }
   saveBlinds();
   requestPositionSave();
   stateRev++;
   LOGI("Blinds saved (%u)", static_cast<unsigned>(blindCount));
+  if (hadSomfy != anySomfy() && radioReady) { rxStop(); rxStart(); LOGI("Receiver retuned to %.2f MHz, %.0f kHz wide", rxMhzNow, rxBwNow); }
   if (mqtt.connected()) mqtt.disconnect();  // reconnect re-subscribes and republishes discovery
   lastMqttTryMs = 0;
   sendOk();
@@ -1846,11 +2151,11 @@ void handleCalibratePost() {
     const int i = findBlind(d["id"] | "");
     if (i < 0) { sendError("unknown blind"); return; }
     calMotion = action == "start_open" ? Motion::Opening : Motion::Closing;
-    if (!sendAction(cfg[i].mask, rfFor(i, calMotion), err)) { sendError(err); return; }
+    if (!blindSend(i, rfFor(i, calMotion), err)) { sendError(err); return; }
     calIndex = i;
     calStartMs = millis();
     LOGI("Calibration started: %s %s", cfg[i].name.c_str(), calMotion == Motion::Opening ? "opening" : "closing");
-    applyAction(cfg[i].mask, rfFor(i, calMotion), "calibration", -1, -1);
+    blindApply(i, rfFor(i, calMotion), "calibration", -1);
     sendOk();
   } else if (action == "done" && calIndex >= 0) {
     const uint32_t ms = millis() - calStartMs;
@@ -1982,7 +2287,7 @@ void handleBackup() {
   n["base_topic"] = net.base; n["discovery_prefix"] = net.discovery;
   JsonObject p = d["pins"].to<JsonObject>();
   p["sck"] = pins.sck; p["miso"] = pins.miso; p["mosi"] = pins.mosi; p["cs"] = pins.cs;
-  p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm;
+  p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm; p["rx_bw"] = pins.rxBw;
   remoteToJson(d["remote"].to<JsonObject>());
   JsonArray b = d["blinds"].to<JsonArray>();
   for (size_t i = 0; i < blindCount; ++i) blindToJson(i, b.add<JsonObject>());
@@ -2010,6 +2315,7 @@ void handleRestore() {
     pins.sck = p["sck"] | pins.sck; pins.miso = p["miso"] | pins.miso; pins.mosi = p["mosi"] | pins.mosi;
     pins.cs = p["cs"] | pins.cs; pins.gdo0 = p["gdo0"] | pins.gdo0; pins.gdo2 = p["gdo2"] | pins.gdo2;
     pins.led = p["led"] | pins.led; pins.mhz = p["mhz"] | pins.mhz; pins.paDbm = p["pa_dbm"] | pins.paDbm;
+    pins.rxBw = p["rx_bw"] | pins.rxBw;
   }
   if (!d["remote"].isNull()) remoteFromJson(d["remote"].as<JsonObjectConst>());
   if (!d["automation"].isNull() && !automationFromJson(d["automation"].as<JsonObjectConst>(), err)) LOGW("Backup schedules skipped: %s", err.c_str());
@@ -2113,6 +2419,48 @@ void handlePairPost() {
   sendOk();
 }
 
+// Somfy RTS: pair a motor with the bridge, follow a hand remote, skip the rolling code ahead.
+void handleSomfyPost() {
+  if (!authed()) return;
+  JsonDocument d; if (!bodyJson(d)) return;
+  const String action = d["action"] | "";
+  if (action == "cancel") { somfyLearn = -1; somfyStatus = "cancelled"; stateRev++; sendOk(); return; }
+  const int i = findBlind(d["id"] | "");
+  if (i < 0 || !cfg[i].somfy) { sendError("choose a Somfy blind"); return; }
+  String err;
+  if (action == "pair") {
+    // The motor must be in programming mode: hold PROG on its remote until it jogs, then press Pair.
+    if (anyMoving()) { sendError("wait until the blinds stop", 409); return; }
+    if (!sendSomfy(i, somfy::Command::Prog, 8, err)) { sendError(err); return; }
+    somfyStatus = "sent PROG for " + cfg[i].name + ": if the motor jogged, it's paired (do the same again to unpair)";
+  } else if (action == "learn") {
+    somfyLearn = i; somfyLearnMs = millis();
+    somfyStatus = "press any button on the Somfy remote for " + cfg[i].name;
+  } else if (action == "forget_remotes") {
+    cfg[i].somfyRemoteCount = 0; saveBlinds();
+    somfyStatus = "forgot the remotes for " + cfg[i].name;
+  } else if (action == "resync") {
+    // The motor ignores codes it has already seen. After restoring an old backup onto a new
+    // board, skip ahead (the motor accepts a jump of up to about 100).
+    const int by = constrain(static_cast<int>(d["by"] | 20), 1, 100);
+    setSomfyCode(cfg[i].somfyAddr, static_cast<uint16_t>(somfyCode(cfg[i].somfyAddr) + by));
+    somfyStatus = String("rolling code for ") + cfg[i].name + " moved on by " + by + " to " + somfyCode(cfg[i].somfyAddr);
+  } else if (action == "send") {
+    // raw button, for testing: up, down, my, prog
+    const String b = d["button"] | "";
+    const somfy::Command c = b == "up" ? somfy::Command::Up : b == "down" ? somfy::Command::Down : b == "my" ? somfy::Command::My
+                           : b == "prog" ? somfy::Command::Prog : somfy::Command::Unknown;
+    if (c == somfy::Command::Unknown) { sendError("button must be up, down, my or prog"); return; }
+    if (!sendSomfy(i, c, c == somfy::Command::Prog ? 8 : 4, err)) { sendError(err); return; }
+    if (c == somfy::Command::Up || c == somfy::Command::Down) blindApply(i, c == somfy::Command::Up ? aok::Action::Open : aok::Action::Close, "test", -1);
+    else if (c == somfy::Command::My && st[i].motion != Motion::Stopped) blindApply(i, aok::Action::Stop, "test", -1);
+    somfyStatus = String("sent ") + b + " to " + cfg[i].name;
+  } else { sendError("unknown action"); return; }
+  LOGI("Somfy: %s", somfyStatus.c_str());
+  stateRev++;
+  sendOk();
+}
+
 // Frequency scan: while someone holds a button on the hand remote, measure the
 // signal across 433.42-434.42 MHz and report where it's strongest.
 void handleFreqScan() {
@@ -2123,6 +2471,7 @@ void handleFreqScan() {
   JsonArray pts = d["points"].to<JsonArray>();
   float best = pins.mhz; int bestRssi = -200;
   rxStop();
+  ELECHOUSE_cc1101.setRxBW(270.0f);  // narrow, so the peak shows where the remote really is
   for (float f = 433.42f; f <= 434.425f; f += 0.05f) {
     ELECHOUSE_cc1101.setMHZ(f);
     ELECHOUSE_cc1101.SetRx(f);
@@ -2132,7 +2481,7 @@ void handleFreqScan() {
     JsonObject o = pts.add<JsonObject>(); o["mhz"] = f; o["rssi"] = peak;
     if (peak > bestRssi) { bestRssi = peak; best = f; }
   }
-  ELECHOUSE_cc1101.setMHZ(pins.mhz);
+  rxBwNow = 0;  // rxStart() puts the bandwidth and frequency back
   rxStart();
   d["best_mhz"] = best; d["best_rssi"] = bestRssi; d["current_mhz"] = pins.mhz;
   LOGI("Frequency scan: strongest at %.2f MHz (%d dBm)", best, bestRssi);
@@ -2261,6 +2610,7 @@ void setupWeb() {
   web.on("/api/scene", HTTP_POST, handleScenePost);
   web.on("/api/lock", HTTP_POST, handleLockPost);
   web.on("/api/pair", HTTP_POST, handlePairPost);
+  web.on("/api/somfy", HTTP_POST, handleSomfyPost);
   web.on("/api/freqscan", HTTP_POST, handleFreqScan);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   // Phones and Windows probe these when they join the setup Wi-Fi; answering them

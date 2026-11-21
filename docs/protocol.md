@@ -74,3 +74,11 @@ For each of Up, Down and Stop, the bridge keeps the 16-bit `button<<8 | base` va
 - Older A-OK remotes (AC114 and similar) use a shorter format. The decoder ignores them.
 - **Pairing to the bridge's own ID (experimental, 1.6.0).** The bridge learns the P button (`AC`) when it's pressed on the hand remote. *Pair automatically* then sends P twice on the channel from the hand remote's ID (the usual "P, P" that puts an A-OK motor in pairing mode) and Up from the bridge's own ID: the same prefix and button bases with a different remote ID. Whether a motor accepts a new ID built this way hasn't been confirmed on every motor yet. Limit setting isn't implemented: set limits with the original remote.
 - If your remote's frames don't decode, the Activity tab and the log will still show what the radio picks up. Please open an issue with them.
+
+## Somfy RTS (since 1.7.0)
+
+The bridge also speaks Somfy RTS at 433.42 MHz (`include/somfy_rts.h`, tested by `test/test_somfy.cpp`). A frame is 7 bytes: `0xA0 | key`, `command << 4 | checksum`, a 16-bit rolling code and a 24-bit address. The checksum makes the XOR of all 14 nibbles zero; each byte is then XORed with the byte sent before it. Bits are Manchester coded with 640 µs halves (a 1 is low then high). The first frame has a wake-up pulse and 2 hardware syncs (2560 µs high and low); repeats have 7. A 4550 µs software sync comes before the data and a 30 ms gap after it. Commands: My 1, Up 2, Down 4, Prog 8.
+
+Each Somfy blind has its own address; the motor learns it like an extra remote when it's in programming mode and receives Prog. The motor only acts on codes higher than the last one it saw from that address (within about 100), so the bridge saves the next code before every send.
+
+Receiving both protocols with one CC1101: with a Somfy blind set up, the receiver centres on the midpoint of the A-OK frequency and 433.42 MHz with an 812 kHz bandwidth (both are ±250 kHz from the centre). The edge stream from GDO2 goes to both decoders. Sending retunes to the exact frequency, then back.

@@ -31,6 +31,7 @@ Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an 
   - an event log
   - settings backup and restore
   - firmware updates
+- **Somfy RTS too.** A blind can be a Somfy RTS motor (433.42 MHz) instead: the same CC1101 hears both kinds and the bridge pairs with the Somfy motor as one more remote. It follows your Situo or Telis remote as well.
 - **Or use ESPHome.** The [`aok_rf` component](docs/esphome.md) gives you the radio as an ESPHome component instead.
 
 ## Hardware

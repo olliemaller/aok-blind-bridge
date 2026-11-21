@@ -447,10 +447,10 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
 <!-- ============ ACTIVITY ============ -->
 <section id="s-activity">
   <div class="card">
-    <div class="hd"><h2>Heard on 433.92 MHz</h2>
+    <div class="hd"><h2 id="actHd">Heard on 433.92 MHz</h2>
       <span class="sp"><label class="switch small"><input type="checkbox" id="onlyMine" onchange="drawActivity()"><span>Only my remote</span></label></span></div>
     <div class="bd">
-      <p class="muted small" style="margin-bottom:6px">Signals from A-OK-protocol remotes nearby, newest first. Neighbours' remotes show as <span class="tag">Other remote</span> and are ignored.</p>
+      <p class="muted small" style="margin-bottom:6px">Signals from A-OK and Somfy RTS remotes nearby, newest first. Neighbours' remotes show as <span class="tag">Other remote</span> and are ignored.</p>
       <div class="list" id="actList"></div>
     </div>
   </div>
@@ -602,11 +602,14 @@ function ago(s){if(s<5)return 'just now';if(s<60)return s+' s ago';if(s<3600)ret
 function dur(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d} d ${h} h`:h?`${h} h ${m} min`:`${m} min`}
 const chList=s=>String(s||'').split(',').map(Number).filter(n=>n>=1&&n<=16);
 const remoteOk=()=>S&&S.remote.complete;
+const isSomfy=b=>b&&b.type==='somfy';
+const needAok=()=>!S||!S.blinds.length||S.blinds.some(b=>!isSomfy(b));
+const blindOk=b=>isSomfy(b)?!!(S&&S.radio.ready):remoteOk();
 
 /* ---------- navigation ---------- */
 function drawNav(){
   const warnSetup=S&&!S.blinds.length?1:0;
-  $('nav').innerHTML=TABS.map(([k,l])=>`<button data-t="${k}" class="${k==tab?'on':''}" onclick="go('${k}')">${l}${k=='remote'&&S&&!S.remote.complete?'<span class="badge">!</span>':''}${k=='setup'&&warnSetup?'<span class="badge">!</span>':''}</button>`).join('');
+  $('nav').innerHTML=TABS.map(([k,l])=>`<button data-t="${k}" class="${k==tab?'on':''}" onclick="go('${k}')">${l}${k=='remote'&&S&&!S.remote.complete&&needAok()?'<span class="badge">!</span>':''}${k=='setup'&&warnSetup?'<span class="badge">!</span>':''}</button>`).join('');
 }
 function go(t,anchor){
   tab=t;try{localStorage.tab=t}catch(e){}
@@ -701,7 +704,7 @@ function render(){
   pill('pWifi',S.wifi.ap?'warn':S.wifi.connected?'ok':'bad',S.wifi.ap?'Setup Wi-Fi':S.wifi.connected?'Wi-Fi':'Wi-Fi offline');
   pill('pMqtt',!S.mqtt.configured?'warn':S.mqtt.connected?'ok':'bad',!S.mqtt.configured?'Home Assistant not set':S.mqtt.connected?'Home Assistant':'Home Assistant offline');
   pill('pRadio',S.radio.ready?'ok':'bad',S.radio.ready?'Radio':'Radio missing');
-  pill('pRemote',S.remote.complete?'ok':S.remote.learning?'warn':'warn',S.remote.complete?'Remote':S.remote.learning?'Learning…':'Remote not learned');
+  if(!needAok()&&!S.remote.complete)pill('pRemote','ok','Somfy');else pill('pRemote',S.remote.complete?'ok':S.remote.learning?'warn':'warn',S.remote.complete?'Remote':S.remote.learning?'Learning…':'Remote not learned');
   drawNav();
   if(tab=='blinds')drawBlinds();
   if(tab=='remote')drawRemote();
@@ -719,7 +722,7 @@ function drawBlinds(){
   if(S.safe_mode)al.push(banner('bad','alert','<b>Safe mode.</b> The bridge crashed three times in a row, so the radio and Home Assistant are off. Check the settings and logs, update the firmware, then restart.','Logs',"go('logs')"));
   if(S.wind)al.push(banner('warn','alert','<b>Wind alarm.</b> Awnings are retracted and held until the wind drops.'));
   if(!S.radio.ready&&!S.safe_mode)al.push(banner('bad','alert','<b>The radio isn\'t responding.</b> Check the CC1101 wiring.','Wiring',"go('settings','set-radio')"));
-  if(!S.remote.complete)al.push(banner('warn','remote','<b>Learn your remote first.</b> The bridge copies it to control the blinds.','Learn remote',"go('remote')"));
+  if(!S.remote.complete&&!(S.blinds.length&&S.blinds.every(isSomfy)))al.push(banner('warn','remote','<b>Learn your remote first.</b> The bridge copies it to control the blinds.','Learn remote',"go('remote')"));
   if(C&&C.network&&!C.network.admin_set&&!(S.wifi&&S.wifi.ap))al.push(banner('warn','alert','<b>No admin password.</b> Anyone on your network can open this page, move the blinds and change the settings. Over-the-air updates from PlatformIO stay off until you set one.','Set password',"go('settings')"));
   $('blindAlerts').innerHTML=al.join('');
   const list=$('blindList');
@@ -729,7 +732,7 @@ function drawBlinds(){
     <button class="btn sm" onclick="cmd('all','CLOSE')">${icon('down')}Close all</button></div>`:'';
   $('allBar').innerHTML+=(S.scenes||[]).length?`<div class="card allbar"><b>Scenes</b>${S.scenes.map(x=>`<button class="btn sm" onclick="runScene('${x.id}')">${icon('blind')}${esc(x.name)}</button>`).join('')}</div>`:'';
   if(!S.blinds.length){blindSig='';list.innerHTML=`<div class="card empty" style="grid-column:1/-1">${icon('blind','')}<p><b>No blinds yet</b></p><p class="small" style="margin:4px 0 14px">Add a blind for each channel on your remote.</p><button class="btn pri" onclick="go('setup')">Set up blinds</button></div>`;return}
-  const sig=S.blinds.map(b=>[b.id,b.name,b.channels,b.favourite,b.group,b.room,b.locked,b.window_open,b.wind,JSON.stringify(b.presets||[])].join('|')).join(';');
+  const sig=S.blinds.map(b=>[b.id,b.name,b.channels,b.favourite,b.group,b.room,b.locked,b.window_open,b.wind,b.type,JSON.stringify(b.presets||[])].join('|')).join(';');
   if(sig!==blindSig){blindSig=sig;
     const rooms=[...new Set(S.blinds.map(b=>b.room||''))];
     const named=rooms.some(r=>r);
@@ -745,14 +748,14 @@ function blindCard(b){
       <rect class="rail" x="5" y="7" width="48" height="2.4" rx="1"/>
       <rect class="head" x="1.5" y="2" width="55" height="5" rx="1.5"/>
     </svg>
-    <div class="bname"><b title="${esc(b.name)}">${esc(b.name)}</b>${b.group?'<span class="tag">Group</span>':''}<span class="tag" title="Remote channel">Ch ${esc(b.channels)}</span>${b.locked?`<span class="tag warn" title="Locked: Home Assistant, scenes and schedules leave it alone">${icon('lock')}Locked</span>`:''}${b.window_open?'<span class="tag warn" title="The window is open: it won\'t close">Window open</span>':''}${b.wind?'<span class="tag warn">Wind</span>':''}</div>
+    <div class="bname"><b title="${esc(b.name)}">${esc(b.name)}</b>${b.group?'<span class="tag">Group</span>':''}${isSomfy(b)?'<span class="tag" title="Somfy RTS motor">Somfy</span>':`<span class="tag" title="Remote channel">Ch ${esc(b.channels)}</span>`}${b.locked?`<span class="tag warn" title="Locked: Home Assistant, scenes and schedules leave it alone">${icon('lock')}Locked</span>`:''}${b.window_open?'<span class="tag warn" title="The window is open: it won\'t close">Window open</span>':''}${b.wind?'<span class="tag warn">Wind</span>':''}</div>
     <div class="bstate"><span class="st"></span></div>
     <div class="bctl">
       <button class="round" title="Up" aria-label="Open ${esc(b.name)}" onclick="cmd('${b.id}','OPEN')">${icon('up')}</button>
       <button class="round" title="Stop" aria-label="Stop ${esc(b.name)}" onclick="cmd('${b.id}','STOP')">${icon('stop')}</button>
       <button class="round" title="Down" aria-label="Close ${esc(b.name)}" onclick="cmd('${b.id}','CLOSE')">${icon('down')}</button>
       <span class="gap"></span>
-      ${b.favourite>=0?`<button class="round fav" title="Favourite (${b.favourite}%)" aria-label="Favourite position" onclick="cmd('${b.id}','FAVOURITE')">${icon('star')}</button>`:''}
+      ${b.favourite>=0?`<button class="round fav" title="${isSomfy(b)?'My':'Favourite'} (${b.favourite}%)" aria-label="Favourite position" onclick="cmd('${b.id}','FAVOURITE')">${icon('star')}</button>`:''}
       <div class="more"><button class="round" title="More" aria-label="More options" onclick="toggleMenu('${b.id}',event)">${icon('more')}</button>
         <div class="menu" id="m-${b.id}">
           ${(b.presets||[]).map((x,k)=>`<button onclick="cmd('${b.id}','PRESET:${k+1}')">${icon('blind')}${esc(x.name)} (${x.position}%)</button>`).join('')}
@@ -841,8 +844,9 @@ function testCh(a){api('/api/test',{channels:String(testSel),action:a})}
 /* set up */
 function drawSetupAlerts(){
   const al=[];
-  if(!S.remote.complete)al.push(banner('warn','remote','<b>Your remote isn\'t learned yet.</b> You can add blinds now, but they won\'t move until it is.','Learn remote',"go('remote')"));
-  const seen=chList(S.remote.seen),used=new Set();(edit||S.blinds).forEach(b=>chList(b.channels).forEach(c=>used.add(c)));
+  const lst=edit||S.blinds;
+  if(!S.remote.complete&&!(lst.length&&lst.every(isSomfy)))al.push(banner('warn','remote','<b>Your remote isn\'t learned yet.</b> You can add blinds now, but they won\'t move until it is.','Learn remote',"go('remote')"));
+  const seen=chList(S.remote.seen),used=new Set();lst.forEach(b=>chList(b.channels).forEach(c=>used.add(c)));
   const missing=seen.filter(c=>!used.has(c));
   if(missing.length)al.push(banner('info','info',`Your remote has used channel${missing.length>1?'s':''} <b>${missing.join(', ')}</b>, which ${missing.length>1?'have':'has'} no blind.`,'Add '+(missing.length>1?'them':'it'),'addMissing()'));
   $('setupAlerts').innerHTML=al.join('');
@@ -851,20 +855,22 @@ function drawEditors(){
   if(!edit)return;
   const seen=chList(S?S.remote.seen:'');
   $('editors').innerHTML=edit.length?edit.map((b,i)=>`<div class="card ed ${openEd.has(b._k)?'open':''}">
-    <div class="edh" onclick="toggleEd('${b._k}')">${icon('blind')}<b>${esc(b.name||'Unnamed blind')}</b>${chList(b.channels).length>1?'<span class="tag">Group</span>':''}<span class="tag">Ch ${esc(b.channels||'–')}</span>
+    <div class="edh" onclick="toggleEd('${b._k}')">${icon('blind')}<b>${esc(b.name||'Unnamed blind')}</b>${isSomfy(b)?'<span class="tag">Somfy</span>':`${chList(b.channels).length>1?'<span class="tag">Group</span>':''}<span class="tag">Ch ${esc(b.channels||'–')}</span>`}
       ${b.room?`<span class="faint small">${esc(b.room)}</span>`:''}<span class="meta">${secs(b.open_ms)} s up · ${secs(b.close_ms)} s down${b.favourite>=0?' · ★ '+b.favourite+'%':''}${b.invert?' · reversed':''}</span><svg class="chev"><use href="#i-down"/></svg></div>
     <div class="edb"><div class="row1"><input type="text" value="${esc(b.name)}" placeholder="Name, e.g. Lounge left" oninput="edit[${i}].name=this.value;markDirty();this.closest('.ed').querySelector('.edh b').textContent=this.value||'Unnamed blind'">
       <button class="btn ghost dng sm" title="Remove" onclick="edit.splice(${i},1);markDirty();drawEditors()">${icon('x')}Remove</button></div>
-    <span class="lab">Remote channel${chList(b.channels).length>1?'s (group)':''}</span>
-    <div class="chans">${Array.from({length:16},(_,c)=>`<button class="chan ${chList(b.channels).includes(c+1)?'on':''} ${seen.includes(c+1)?'seen':''}" onclick="toggleCh(${i},${c+1})">${c+1}</button>`).join('')}</div>
+    <span class="lab">Motor</span>
+    <div class="btns" style="margin-bottom:10px">${[['aok',!S||S.brand=='A-OK'?'A-OK':S.brand+' (A-OK)'],['somfy','Somfy RTS']].map(([t,l])=>`<button class="chan ${(b.type||'aok')==t?'on':''}" style="width:auto;padding:0 12px" onclick="setType(${i},'${t}')">${esc(l)}</button>`).join('')}</div>
+    ${isSomfy(b)?somfyPanel(b,i):`<span class="lab">Remote channel${chList(b.channels).length>1?'s (group)':''}</span>
+    <div class="chans">${Array.from({length:16},(_,c)=>`<button class="chan ${chList(b.channels).includes(c+1)?'on':''} ${seen.includes(c+1)?'seen':''}" onclick="toggleCh(${i},${c+1})">${c+1}</button>`).join('')}</div>`}
     <div class="grid3" style="margin-top:14px">
       <label class="field"><span>Room</span><input type="text" list="roomList" value="${esc(b.room||'')}" placeholder="e.g. Lounge" oninput="edit[${i}].room=this.value;markDirty()"></label>
       <label class="field" style="grid-column:span 2"><span>&nbsp;</span><small style="padding-top:8px">Blinds are grouped by room here, and Home Assistant puts them in that area.</small></label>
       <label class="field"><span>Opening time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.open_ms)}" oninput="edit[${i}].open_ms=Math.round(this.value*1000);markDirty()"></label>
       <label class="field"><span>Closing time (s)</span><input type="number" step="0.1" min="1" value="${secs(b.close_ms)}" oninput="edit[${i}].close_ms=Math.round(this.value*1000);markDirty()"></label>
       <label class="field"><span>Start-up delay (s)</span><input type="number" step="0.1" min="0" max="3" placeholder="0" value="${b.start_ms?secs(b.start_ms):''}" oninput="edit[${i}].start_ms=Math.round((parseFloat(this.value)||0)*1000);markDirty()"><small>How long the motor takes to start after a command. Makes short moves land closer to the target.</small></label>
-      <label class="field"><span>Tilt time (s)</span><input type="number" step="0.1" min="0" max="5" placeholder="No tilt" value="${b.tilt_ms?secs(b.tilt_ms):''}" oninput="edit[${i}].tilt_ms=Math.round((parseFloat(this.value)||0)*1000);markDirty()"><small>Venetian blinds: how long the slats take to turn from closed to open. Adds tilt control in Home Assistant.</small></label>
-      <label class="field"><span>Favourite position (%)</span><input type="number" min="0" max="100" placeholder="None" value="${b.favourite>=0?b.favourite:''}" oninput="edit[${i}].favourite=this.value===''?-1:Math.max(0,Math.min(100,parseInt(this.value)||0));markDirty()"></label>
+      ${isSomfy(b)?'':`<label class="field"><span>Tilt time (s)</span><input type="number" step="0.1" min="0" max="5" placeholder="No tilt" value="${b.tilt_ms?secs(b.tilt_ms):''}" oninput="edit[${i}].tilt_ms=Math.round((parseFloat(this.value)||0)*1000);markDirty()"><small>Venetian blinds: how long the slats take to turn from closed to open. Adds tilt control in Home Assistant.</small></label>`}
+      <label class="field"><span>${isSomfy(b)?'My position (%)':'Favourite position (%)'}</span><input type="number" min="0" max="100" placeholder="None" value="${b.favourite>=0?b.favourite:''}" oninput="edit[${i}].favourite=this.value===''?-1:Math.max(0,Math.min(100,parseInt(this.value)||0));markDirty()">${isSomfy(b)?'<small>Where the motor goes on My. Leave empty if it has none.</small>':''}</label>
     </div>
     <span class="lab" style="margin-top:6px">Named positions <span class="faint">(buttons here and in Home Assistant)</span></span>
     <div class="grid3">${[0,1,2,3].map(k=>{const x=(b.presets||[])[k]||{};return `<label class="field"><span>Name</span><input type="text" value="${esc(x.name||'')}" placeholder="e.g. Privacy" oninput="setPreset(${i},${k},'name',this.value)"></label><label class="field"><span>Position (%)</span><input type="number" min="0" max="100" value="${x.position!=null?x.position:''}" placeholder="–" oninput="setPreset(${i},${k},'position',this.value)"></label>${k%1==0?'<span></span>':''}`}).join('')}</div>
@@ -882,6 +888,26 @@ function drawEditors(){
   $('roomList').innerHTML=rl.map(r=>`<option value="${esc(r)}">`).join('');
   if(S)drawSetupAlerts();
 }
+function somfyPanel(b,i){
+  const saved=C&&C.blinds.find(x=>x.id==b.id&&isSomfy(x)),so=S&&S.somfy||{},learning=so.learning==b.id;
+  const rem=(b.somfy_remotes||[]);
+  return `<div class="card" style="box-shadow:none;border:1px solid var(--line);padding:12px;margin-bottom:4px">
+    ${saved?`<div class="small muted" style="margin-bottom:8px">Bridge address <span class="mono">${esc(saved.somfy_address)}</span> · rolling code ${saved.somfy_code} · ${S?S.somfy.mhz:433.42} MHz</div>
+    <ol class="small" style="margin:0 0 10px 18px;padding:0">
+      <li>On the Somfy remote that already works this blind, hold <b>PROG</b> (the small button on the back) until the blind jogs up and down.</li>
+      <li>Within two minutes, press <b>Pair</b> here. The blind jogs again: it's paired.</li></ol>
+    <div class="btns">
+      <button class="btn sm" onclick="somfyAct('pair','${b.id}')">Pair</button>
+      <button class="btn sm ghost" onclick="somfyAct(${learning?"'cancel'":"'learn'"},'${b.id}')">${learning?'Stop listening':'Follow a Somfy remote'}</button>
+      ${rem.length?`<button class="btn sm ghost" onclick="somfyAct('forget_remotes','${b.id}')">Forget remotes</button>`:''}
+      <button class="btn sm ghost" title="Only after restoring an old backup on a new board" onclick="if(confirm('Skip the rolling code ahead by 20? Only needed if the motor stopped answering after a restore.'))somfyAct('resync','${b.id}')">Resync</button>
+    </div>
+    <div class="small faint" style="margin-top:8px">${rem.length?'Following remote'+(rem.length>1?'s ':' ')+rem.map(r=>`<span class="mono">${esc(r)}</span>`).join(', ')+': its presses move the position here too.':'Follow the blind\'s hand remote so its presses update the position here.'}${so.status&&so.status!='idle'?'<br>'+esc(so.status):''}</div>`
+    :'<div class="small muted">Save to give this blind its own Somfy address, then pair it with the motor.</div>'}
+  </div>`;
+}
+function setType(i,t){const b=edit[i];if((b.type||'aok')==t)return;b.type=t;if(t=='somfy'){b.channels='';b.tilt_ms=0}else if(!chList(b.channels).length)b.channels=String(nextChannel());markDirty();drawEditors()}
+async function somfyAct(action,id,extra){const j=await api('/api/somfy',{action,id,...(extra||{})});if(j&&action!='learn'&&action!='cancel')toast(S&&S.somfy?'Done':'Sent');if(j&&(action=='forget_remotes'||action=='resync')&&!dirty)loadConfig()}
 function setPreset(i,k,f,v){const b=edit[i];b.presets=[0,1,2,3].map(n=>({...((b.presets||[])[n]||{})}));const x=b.presets[k];
   if(f=='position')x.position=v===''?null:Math.max(0,Math.min(100,parseInt(v)||0));else x.name=v;
   markDirty()}
@@ -939,7 +965,7 @@ async function saveAuto(){
   const j=await api('/api/automation',body);if(j){toast('Scenes and schedules saved');loadAuto()}
 }
 function toggleCh(i,c){const l=chList(edit[i].channels).filter(x=>x!=c);if(!chList(edit[i].channels).includes(c))l.push(c);edit[i].channels=l.sort((a,b)=>a-b).join(',');markDirty();drawEditors()}
-function testRow(i,a){const ch=edit[i].channels;if(!ch)return toast('Choose a channel first',true);api('/api/test',{channels:ch,action:a})}
+function testRow(i,a){const b=edit[i];if(isSomfy(b)){if(!C||!C.blinds.find(x=>x.id==b.id))return toast('Save the blind first',true);return somfyAct('send',b.id,{button:a=='open'?'up':a=='close'?'down':'my'})}const ch=edit[i].channels;if(!ch)return toast('Choose a channel first',true);api('/api/test',{channels:ch,action:a})}
 function markDirty(){dirty=true;$('savebar').classList.add('show')}
 function discardEdits(){dirty=false;$('savebar').classList.remove('show');edit=C?C.blinds.map(b=>({...b,_k:b.id})):[];drawEditors()}
 function toggleEd(k){openEd.has(k)?openEd.delete(k):openEd.add(k);drawEditors()}
@@ -958,7 +984,7 @@ function addMissing(){
   run();
 }
 async function saveBlinds(){
-  for(const b of edit){if(!b.name.trim())return toast('Every blind needs a name',true);if(!chList(b.channels).length)return toast(`${b.name}: choose a channel`,true)}
+  for(const b of edit){if(!b.name.trim())return toast('Every blind needs a name',true);if(!isSomfy(b)&&!chList(b.channels).length)return toast(`${b.name}: choose a channel`,true)}
   const j=await api('/api/blinds',{blinds:edit.map(({_k,...b})=>({...b,presets:(b.presets||[]).filter(x=>x&&x.position!=null&&x.position!=='')}))});
   if(j){dirty=false;$('savebar').classList.remove('show');toast('Blinds saved');blindSig='';loadConfig()}
 }
@@ -981,7 +1007,7 @@ function drawCal(){
   ['cs1','cs2','cs3'].forEach((id,i)=>{const li=$(id);li.querySelector('.n').innerHTML=li.className=='done'?icon('check'):i+1});
   $('calLiveLbl').innerHTML=c.active?`<span style="color:var(--acc)">${esc(c.name||'')} is ${c.direction}. Press <b>It's stopped</b> when it stops.</span>`:(b?'Ready':'Add a blind first');
   if(!c.active)$('calTimer').innerHTML='0.0<small>s</small>';
-  $('calClose').disabled=$('calOpen').disabled=c.active||!b||!remoteOk();
+  $('calClose').disabled=$('calOpen').disabled=c.active||!b||!blindOk(b);
   $('calDone').disabled=$('calCancel').disabled=!c.active;
   $('calTimes').innerHTML=S.blinds.length?'<tr><th>Blind</th><th class="num">Opening</th><th class="num">Closing</th><th>Last calibrated</th></tr>'+S.blinds.map(x=>{const h=[...S.cal_history].reverse().find(r=>r.name==x.name);return `<tr><td>${esc(x.name)}</td><td class="num">${secs(x.open_ms)} s</td><td class="num">${secs(x.close_ms)} s</td><td class="faint small">${h?(h.when?clock(h.when):'Earlier'):'Never'}</td></tr>`}).join(''):'<tr><td class="faint">No blinds yet</td></tr>';
   const hist=[...S.cal_history].reverse();
@@ -999,11 +1025,20 @@ async function cal(a){
 function clearCal(){if(confirm('Clear the calibration log? Travel times are kept.'))api('/api/calibrate',{action:'clear_history'})}
 
 /* activity */
+const SKIND={up:['up','Up'],down:['down','Down'],my:['stop','My'],prog:['prog','PROG button'],my_up:['up','My + Up'],my_down:['down','My + Down'],up_down:['dot','Up + Down'],sun_flag:['dot','Sun'],flag:['dot','Flag'],unknown:['dot','Other button']};
 const KIND={up:['up','Up'],down:['down','Down'],stop:['stop','Stop'],program:['prog','Programming (P) button'],release:['release','Button released'],other:['dot','Other button']};
 function drawActivity(){
+  $('actHd').textContent=S.blinds.some(isSomfy)?`Heard on ${(+S.radio.mhz).toFixed(2)} and 433.42 MHz`:`Heard on ${(+S.radio.mhz).toFixed(2)} MHz`;
   const only=$('onlyMine').checked,list=S.frames.filter(f=>!only||f.matched);
-  $('actList').innerHTML=list.length?list.map(f=>{const k=KIND[f.kind]||KIND.other;const lbl=f.kind=='other'?`${k[1]} <span class="mono faint">${esc(f.code)}</span>`:k[1];
-    const names=S.blinds.filter(b=>f.matched&&chList(b.channels).every(c=>chList(f.channels).includes(c))).map(b=>b.name);
+  $('actList').innerHTML=list.length?list.map(f=>{if(f.protocol=='somfy'){const k=SKIND[f.kind]||SKIND.unknown;
+    const names=S.blinds.filter(b=>isSomfy(b)&&(b.somfy_remotes||[]).includes(f.address)).map(b=>b.name);
+    return `<div class="li"><span class="kind ${f.matched?'mine':''}">${icon(k[0])}</span>
+      <div class="grow"><div>Somfy ${k[1]}${f.repeats>1?` <span class="faint small">×${f.repeats}</span>`:''}</div>
+      <div class="small faint">${f.matched&&names.length?esc(names.join(', ')):'Remote <span class="mono">'+esc(f.address)+'</span>'} · code ${f.rolling_code}</div></div>
+      ${f.matched?'<span class="tag acc">Your remote</span>':'<span class="tag">Other remote</span>'}
+      <span class="when">${f.when?clock(f.when):ago(f.ago_s)}</span></div>`}
+    const k=KIND[f.kind]||KIND.other;const lbl=f.kind=='other'?`${k[1]} <span class="mono faint">${esc(f.code)}</span>`:k[1];
+    const names=S.blinds.filter(b=>!isSomfy(b)&&f.matched&&chList(b.channels).every(c=>chList(f.channels).includes(c))).map(b=>b.name);
     return `<div class="li"><span class="kind ${f.matched?'mine':''}">${icon(k[0])}</span>
       <div class="grow"><div>${lbl} · channel ${esc(f.channels)}${f.repeats>1?` <span class="faint small">×${f.repeats}</span>`:''}</div>
       <div class="small faint">${f.matched?(names.length?esc(names.join(', ')):'Your remote'):'Other remote '+esc(f.remote_id)}</div></div>
@@ -1046,7 +1081,7 @@ function fillSettings(){
   $('hostHint').innerHTML=`Open the page at <span class="mono">http://${esc(n.hostname)}.local</span>`;
   const P=[['sck','SCK',5],['miso','MISO',7],['mosi','MOSI',6],['cs','CSN',4],['gdo0','GDO0 (send)',3],['gdo2','GDO2 (receive)',8]];
   $('wiring').innerHTML='<tr><th>CC1101 pin</th><th>ESP32 GPIO</th></tr><tr><td>VCC (pin 2)</td><td>3V3 <span class="faint small">not 5V</span></td></tr><tr><td>GND (pin 1)</td><td>GND</td></tr>'+P.map(([k,l,n])=>`<tr><td>${l} (pin ${n})</td><td>${C.pins[k]}</td></tr>`).join('');
-  const PG=[['sck','SCK'],['miso','MISO'],['mosi','MOSI'],['cs','CSN'],['gdo0','GDO0'],['gdo2','GDO2'],['led','Status LED (-1 none)'],['mhz','Frequency (MHz)'],['pa_dbm','Power (dBm)']];
+  const PG=[['sck','SCK'],['miso','MISO'],['mosi','MOSI'],['cs','CSN'],['gdo0','GDO0'],['gdo2','GDO2'],['led','Status LED (-1 none)'],['mhz','Frequency (MHz)'],['pa_dbm','Power (dBm)'],['rx_bw','Receive bandwidth (kHz, 0 auto)']];
   if(!$('pinGrid').dataset.filled){$('pinGrid').innerHTML=PG.map(([k,l])=>`<label class="field"><span>${l}</span><input type="number" step="any" id="p_${k}" value="${C.pins[k]}"></label>`).join('');$('pinGrid').dataset.filled=1}
   document.querySelectorAll('#s-settings input[id^=n_],#s-settings select[id^=n_]').forEach(e=>e.oninput=e.onchange=()=>e.dataset.touched=1);
 }
@@ -1132,7 +1167,7 @@ async function testMqtt(){
   catch(e){out.innerHTML='<span style="color:var(--bad)">The bridge didn\'t answer.</span>'}
   b.disabled=false;b.textContent='Test connection';
 }
-async function savePins(){const b={};['sck','miso','mosi','cs','gdo0','gdo2','led','mhz','pa_dbm'].forEach(k=>b[k]=parseFloat($('p_'+k).value));const j=await api('/api/pins',b);if(j)toast('Saved. Restarting…')}
+async function savePins(){const b={};['sck','miso','mosi','cs','gdo0','gdo2','led','mhz','pa_dbm','rx_bw'].forEach(k=>b[k]=parseFloat($('p_'+k).value));const j=await api('/api/pins',b);if(j)toast('Saved. Restarting…')}
 function restart(){if(confirm('Restart the bridge? It takes about 10 seconds.'))api('/api/reboot',{}).then(j=>j&&toast('Restarting…'))}
 function upload(){
   const f=$('fwFile').files[0];if(!f)return toast('Choose the .bin file first',true);

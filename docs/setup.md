@@ -33,6 +33,18 @@ If **Radio** is red, the ESP32 can't talk to the CC1101. Check that VCC goes to 
 
 Use the test buttons on each blind to check it's the right one, then **Save blinds**.
 
+### Somfy RTS blinds
+
+In the blind's editor, choose **Somfy RTS** under *Motor* and save. The blind gets its own Somfy address (shown with its rolling code). Then:
+
+1. On the Somfy remote that already works the blind (a Situo or Telis), hold **PROG** on the back until the blind jogs up and down.
+2. Within two minutes, press **Pair** in the editor. The blind jogs again: the bridge is now one of its remotes. Doing the same again removes it.
+3. Press **Follow a Somfy remote**, then any button on the Situo. Its presses then move the position on the page and in Home Assistant.
+
+Somfy motors stop at their own limits, so open and close need nothing extra. For positions in between, calibrate the travel times as for any blind. If the motor has a *My* (favourite) position, enter it as **My position** and the star button sends My.
+
+With a Somfy blind set up, the radio listens half way between the A-OK frequency and 433.42 MHz with a wide bandwidth, so both kinds of remote are heard. If A-OK reception gets worse, try a *Receive bandwidth* of 650 under Settings → Radio.
+
 ## 5. Calibrate
 
 **Calibrate**, pick a blind, and make sure it's fully open:

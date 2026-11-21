@@ -13,7 +13,11 @@ NET = dict(brand="A-OK", tz="", tz_name="")
 blinds = [dict(id=n.lower().replace(" ", "_"), name=n, channels=str(i + 1), open_ms=24000 + i * 900, close_ms=22000 + i * 700,
                invert=False, favourite=(40 if i == 0 else -1), device_class="shade", room=rooms[i]) for i, n in enumerate(names)]
 blinds.append(dict(id="lounge", name="Lounge (both)", channels="1,2", open_ms=24000, close_ms=22000, invert=False, favourite=-1, device_class="shade", room="Lounge"))
-state = {b["id"]: dict(pos=[100, 60, 0, 35, 100, -1, 80][i], motion="stopped", start=0, startpos=0, goal=0) for i, b in enumerate(blinds)}
+for b in blinds: b["type"] = "aok"
+blinds.append(dict(id="bedroom_roller", name="Bedroom roller", type="somfy", channels="", somfy_address="3C7A01", somfy_code=17,
+                   somfy_remotes=["0F12AB"], open_ms=21000, close_ms=20000, invert=False, favourite=45, device_class="shade", room="Bedroom"))
+SOMFY = dict(status="idle", learning="", mhz=433.42)
+state = {b["id"]: dict(pos=[100, 60, 0, 35, 100, -1, 80, 30][i], motion="stopped", start=0, startpos=0, goal=0) for i, b in enumerate(blinds)}
 remote = dict(prefix="A1B2C3", remote_id="3F", open="F42A", close="BCF2", stop="DC12", listen=True, seen="1,2,3,4,5,6,7", prog="AC40", own_id="99", own_channels="3", repeat=False, extra=[])
 cal = dict(active=False)
 AUTO = dict(latitude=-37.81, longitude=144.96,
@@ -32,6 +36,7 @@ log("I", "Wi-Fi connected to HomeWiFi, IP 192.168.0.150, signal -58 dBm")
 log("W", "MQTT 192.168.0.202:1883: broker not reachable (code -2)")
 log("I", "MQTT connected to 192.168.0.202:1883")
 frames = [
+    dict(protocol="somfy", ago_s=2, payload="A7F3127D0A9B21", address="0F12AB", rolling_code=233, action="down", matched=True, repeats=4, kind="down"),
     dict(ago_s=4, payload="A1B2C33F0001F42A", remote_id="3F", prefix="A1B2C3", channels="1", action="open", matched=True, repeats=3, kind="up", code="F4"),
     dict(ago_s=40, payload="A1B2C33F0002DB11", remote_id="3F", prefix="A1B2C3", channels="2", action="unknown", matched=True, repeats=1, kind="release", code="DB"),
     dict(ago_s=95, payload="0F0E0D7A0004BC10", remote_id="7A", prefix="0F0E0D", channels="3", action="close", matched=False, repeats=2, kind="down", code="BC"),
@@ -60,14 +65,14 @@ def full_state():
     out = dict(fw="1.3.0", rev=REV[0], brand=NET["brand"], uptime=int(time.time() - T0) + 7300, heap=181234, reset_reason=1, time=int(time.time()), log_seq=len(logs),
                wifi=dict(connected=True, ssid="HomeWiFi", ip="192.168.0.150", rssi=-58, ap=False, hostname="aok-blinds"),
                mqtt=dict(configured=True, connected=True, state=0),
-               radio=dict(ready=True, overflow=0, mhz=433.92, last_tx_ago_s=12, last_rx_ago_s=4),
+               radio=dict(ready=True, overflow=0, mhz=433.92, rx_mhz=433.67, rx_bw=812, last_tx_ago_s=12, last_rx_ago_s=4), somfy=SOMFY,
                remote=dict(remote, timings={}, complete=True, learning=False, learn_status="complete"),
                blinds=[], frames=frames, cal_history=cal_hist, safe_mode=False, wind=False,
                scenes=[dict(id=x["id"], name=x["name"]) for x in AUTO["scenes"]],
                calibration=dict(cal, elapsed_ms=int((time.time() - cal.get("t", 0)) * 1000)) if cal["active"] else dict(active=False))
     for b in blinds:
         s = state[b["id"]]; p = cur(b)
-        o = dict(b, position=p, motion=s["motion"], target=s["goal"], source="web", group="," in b["channels"],
+        o = dict(b, position=p, motion=s["motion"], target=s["goal"], source="web", group="," in (b.get("channels") or ""),
                  locked=b["id"] in locks, window_open=b["id"] == "study", wind=False)
         if s["motion"] != "stopped":
             o["rate"] = 100000 / travel(b, s["motion"]); o["goal"] = s["goal"]
@@ -147,12 +152,18 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/freqscan":
             time.sleep(1); return self.send(200, dict(best_mhz=433.95, best_rssi=-52, current_mhz=433.92, points=[]))
         if p == "/api/pair": return self.send(200, {"ok": True})
+        if p == "/api/somfy":
+            SOMFY["learning"] = body.get("id", "") if body["action"] == "learn" else ""
+            SOMFY["status"] = f"{body['action']} for {body.get('id', '')}"
+            log("I", "Somfy: " + SOMFY["status"]); REV[0] += 1; return self.send(200, {"ok": True})
         if p == "/api/lock":
             (locks.add if body.get("locked") else locks.discard)(body["id"]); return self.send(200, {"ok": True})
         if p == "/api/blinds":
             blinds[:] = body["blinds"]
             for b in blinds:
-                b.setdefault("id", b["name"].lower().replace(" ", "_")); state.setdefault(b["id"], dict(pos=-1, motion="stopped", start=0, startpos=0, goal=0))
+                b.setdefault("id", b["name"].lower().replace(" ", "_"))
+                if b.get("type") == "somfy": b.setdefault("somfy_address", "3C7A02"); b.setdefault("somfy_code", 1); b["channels"] = ""
+                state.setdefault(b["id"], dict(pos=-1, motion="stopped", start=0, startpos=0, goal=0))
             return self.send(200, {"ok": True})
         self.send(200, {"ok": True})
 

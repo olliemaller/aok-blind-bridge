@@ -1,6 +1,20 @@
 # Changelog
 
+## [1.7.0] - 2026-11-21
+
+### Added
+- **Somfy RTS motors on the same bridge.** A blind can now be a *Somfy RTS* motor (433.42 MHz) instead of an A-OK one, so a house with both kinds needs one ESP32 and one CC1101. Each Somfy blind gets its own bridge address and rolling code; pair it by holding PROG on its Somfy remote until it jogs, then pressing *Pair*. Positions, calibration, scenes, schedules, locks, the window interlock, wind protection, *All blinds* and Home Assistant discovery work the same as for A-OK blinds. Stop is sent as *My* only while the motor is moving, so a stopped motor is never sent to its My position by accident; set *My position* and the favourite button uses it.
+- **Follow a Somfy remote:** the bridge learns a Situo or Telis remote's address (up to 3 per blind) and moves the position when that remote is used. Its presses also fire the *Remote button* event, with `somfy_remote` and `somfy_command`.
+- **One receiver for both:** with any Somfy blind set up, the CC1101 listens half way between the A-OK frequency and 433.42 MHz with an 812 kHz bandwidth and decodes both protocols from the same signal. *Receive bandwidth* in the radio settings overrides this. Sending retunes to each motor's exact frequency.
+- The Activity tab shows Somfy frames (button, remote address and rolling code).
+- `POST /api/somfy` with `pair`, `learn`, `cancel`, `forget_remotes`, `resync` and `send` (raw up/down/my/prog, for testing).
+
+### Notes
+- Rolling codes are written to flash before every send and are part of the backup. Restoring a backup never moves a code backwards. *Resync* skips a code ahead by 20, only needed if a motor stops answering after restoring onto a new board.
+- The ESPHome `aok_rf` component is still A-OK only. For Somfy in ESPHome use the firmware, or ESPSomfy-RTS.
+
 ## Unreleased
+
 
 ### ESPHome component
 - `aok_rf` now has the bridge's radio features: `extra_remotes`, `on_long_press`, an `rssi:` sensor, `repeat_remote`, `aok_rf.frequency_scan`, and pairing to the component's own ID (`own_id`, `own_channels`, `aok_rf.pair`, `program:` in `remote:`).
