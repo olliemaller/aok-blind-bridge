@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.7.1] - 2026-11-22
+
+### Fixed
+- A schedule set for a time the bridge never saw that day now still runs, as soon as the bridge notices: the hour the clocks go forward for daylight saving (a 02:30 schedule on the first Sunday in October in Australia never ran), or minutes lost to a long firmware update. After a restart only schedules from that minute on run, so a power cut doesn't replay the morning.
+
 ## [1.7.0] - 2026-11-21
 
 ### Added

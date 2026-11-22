@@ -31,7 +31,7 @@
 #include "somfy_rts.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.7.0"
+#define FW_VERSION "1.7.1"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -211,6 +211,7 @@ WebSocketsServer ws(81);
 uint32_t lastWsPushMs = 0, lastWsRev = 0;
 aok::Action pressAction = aok::Action::Unknown;
 int lastScheduleMinute = -1;
+int lastScheduleDay = -1;
 uint32_t learnPrefix = 0;
 uint8_t learnRemoteId = 0;
 uint32_t stateRev = 1;               // bumps when frames, calibration history or config change (page refetches)
@@ -1661,12 +1662,18 @@ void checkSchedules() {
   struct tm lt; localtime_r(&now, &lt);
   const int minute = lt.tm_hour * 60 + lt.tm_min;
   if (minute == lastScheduleMinute) return;
+  // Minutes skipped since the last check today (the clocks going forward, or a long
+  // firmware update) still count; after a restart only the current minute does.
+  const int from = lastScheduleDay == lt.tm_yday && lastScheduleMinute >= 0 && minute > lastScheduleMinute
+                       ? lastScheduleMinute + 1 : minute;
   lastScheduleMinute = minute;
+  lastScheduleDay = lt.tm_yday;
   const int weekday = (lt.tm_wday + 6) % 7;  // 0 = Monday
   for (size_t k = 0; k < scheduleCount; ++k) {
     Schedule& s = schedules[k];
     if (!s.enabled || !(s.days & (1 << weekday)) || s.lastDay == lt.tm_yday) continue;
-    if (scheduleMinute(s, lt) != minute) continue;
+    const int due = scheduleMinute(s, lt);
+    if (due < from || due > minute) continue;
     s.lastDay = lt.tm_yday;
     runSchedule(s);
   }
