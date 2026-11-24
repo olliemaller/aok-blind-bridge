@@ -124,6 +124,8 @@ CONFIG_SCHEMA = cv.Schema(
         ),
     }
 ).extend(cv.COMPONENT_SCHEMA)
+# The CC1101 library and the GDO2 interrupt use the Arduino API
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, cv.only_with_arduino)
 
 
 async def to_code(config):

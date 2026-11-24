@@ -129,25 +129,42 @@ void AokRf::pair(uint16_t mask, bool pressed_p_already) {
 }
 
 void AokRf::frequency_scan() {
-  if (!ready_) return;
+  if (!ready_ || scan_step_ >= 0) return;
   this->stop_rx_();
-  float best = mhz_;
-  int best_rssi = -200;
-  for (float f = 433.42f; f <= 434.425f; f += 0.05f) {
-    ELECHOUSE_cc1101.setMHZ(f);
-    ELECHOUSE_cc1101.SetRx(f);
-    int peak = -200;
-    const uint32_t t0 = millis();
-    while (millis() - t0 < 180) { peak = std::max(peak, ELECHOUSE_cc1101.getRssi()); delay(2); }
-    ESP_LOGD(TAG, "  %.2f MHz: %d dBm", f, peak);
-    if (peak > best_rssi) { best_rssi = peak; best = f; }
-  }
+  scan_best_ = mhz_;
+  scan_best_rssi_ = -200;
+  scan_step_ = 0;
+  this->scan_tune_();
+}
+
+// One 50 kHz step every 180 ms from loop(), so ESPHome's loop and its watchdog keep running.
+void AokRf::scan_tune_() {
+  const float f = 433.42f + 0.05f * scan_step_;
+  ELECHOUSE_cc1101.setMHZ(f);
+  ELECHOUSE_cc1101.SetRx(f);
+  scan_peak_ = -200;
+  scan_at_ms_ = millis();
+}
+
+void AokRf::scan_step_loop_() {
+  scan_peak_ = std::max(scan_peak_, ELECHOUSE_cc1101.getRssi());
+  if (millis() - scan_at_ms_ < 180) return;
+  const float f = 433.42f + 0.05f * scan_step_;
+  ESP_LOGD(TAG, "  %.2f MHz: %d dBm", f, scan_peak_);
+  if (scan_peak_ > scan_best_rssi_) { scan_best_rssi_ = scan_peak_; scan_best_ = f; }
+  if (++scan_step_ < 21) { this->scan_tune_(); return; }
+  scan_step_ = -1;
   ELECHOUSE_cc1101.setMHZ(mhz_);
   this->start_rx_();
-  ESP_LOGI(TAG, "Frequency scan: strongest at %.2f MHz (%d dBm); set frequency: %.2fMHz to use it", best, best_rssi, best);
+  ESP_LOGI(TAG, "Frequency scan: strongest at %.2f MHz (%d dBm); set frequency: %.2fMHz to use it", scan_best_,
+           scan_best_rssi_, scan_best_);
 }
 
 bool AokRf::transmit_(uint64_t payload) {
+  if (scan_step_ >= 0) {  // sending retunes the radio, so the scan's readings would be wrong
+    scan_step_ = -1;
+    ESP_LOGW(TAG, "Frequency scan stopped: a command was sent. Run it again.");
+  }
   uint16_t pulses[aok::kFramePulses];
   const size_t n = aok::encodeFrame(payload, timings_, pulses, aok::kFramePulses);
   this->stop_rx_();
@@ -169,6 +186,7 @@ bool AokRf::transmit_(uint64_t payload) {
 
 void AokRf::loop() {
   if (!ready_) return;
+  if (scan_step_ >= 0) this->scan_step_loop_();
   const uint32_t now = millis();
   // a held button ended: long press event, and the repeater
   if (press_active_ && now - last_payload_ms_ > 500) {

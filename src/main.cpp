@@ -31,7 +31,7 @@
 #include "somfy_rts.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.7.1"
+#define FW_VERSION "1.8.0"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -1012,7 +1012,8 @@ void deviceJson(JsonObject o) {
   dev["model"] = "ESP32 + CC1101";
   dev["sw_version"] = FW_VERSION;
   if (netUp()) dev["configuration_url"] = String("http://") + netIp().toString();
-  o["availability_topic"] = topic("status");
+  // Home Assistant refuses a payload with both availability keys; covers bring their own list.
+  if (!o["availability"].is<JsonArray>()) o["availability_topic"] = topic("status");
   JsonObject origin = o["origin"].to<JsonObject>();
   origin["name"] = "aok-blind-bridge"; origin["sw_version"] = FW_VERSION; origin["support_url"] = PROJECT_URL;
 }
@@ -1308,7 +1309,8 @@ void ensureMqtt() {
   // timed Stop must never wait behind it.
   if (anyMoving()) return;
   lastMqttTryMs = millis();
-  mqtt.setSocketTimeout(3);
+  mqtt.setSocketTimeout(2);
+  wifiClient.setTimeout(2);  // the TCP connect itself, not only the MQTT reply
   mqtt.setServer(net.mqttHost.c_str(), net.mqttPort);
   const String clientId = net.base + "_" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
   const String will = topic("status");
@@ -1899,12 +1901,54 @@ bool fromOwnPage() {
   return false;
 }
 
-bool authed() {
-  if (!fromOwnPage()) return false;
-  if (!net.adminPass.length()) return true;
+// DNS rebinding: a web site can point its own name at this bridge's address, and the
+// browser then treats the bridge as that site. The Host header still carries the other
+// site's name, so only answer to the bridge's own IP addresses and name.
+bool hostAllowed(String h) {
+  if (h.startsWith("[")) return false;  // IPv6 literal: the bridge only serves on IPv4
+  const int colon = h.indexOf(':');
+  if (colon >= 0) h = h.substring(0, colon);
+  h.toLowerCase();
+  if (h.endsWith(".")) h.remove(h.length() - 1);
+  String name = net.hostname; name.toLowerCase();
+  if (h == name || h == name + ".local") return true;
+  if (netUp() && h == netIp().toString()) return true;
+  if (WiFi.status() == WL_CONNECTED && h == WiFi.localIP().toString()) return true;  // Ethernet builds with Wi-Fi too
+  return apMode && h == WiFi.softAPIP().toString();
+}
+
+bool hostOk() {
+  if (hostAllowed(web.hostHeader())) return true;
+  LOGW("Refused %s: sent to the unknown name '%s'", web.uri().c_str(), web.hostHeader().c_str());
+  sendError("refused: open the bridge by its IP address or its .local name", 403);
+  return false;
+}
+
+const char* const kNeedPassword =
+  "set an admin password first: Settings, Device, Admin password. Until then this page only does Wi-Fi setup";
+
+// Every API request: the right Host, the bridge's own page for changes, then the password.
+// Until a password is set only `setup` requests (Wi-Fi, the password itself, status) work.
+bool authed(bool setup = false) {
+  if (!hostOk() || !fromOwnPage()) return false;
+  if (!net.adminPass.length()) {
+    if (setup) return true;
+    sendError(kNeedPassword, 403);
+    return false;
+  }
   if (web.authenticate("admin", net.adminPass.c_str())) return true;
   web.requestAuthentication(BASIC_AUTH, "Blind Bridge");
   return false;
+}
+
+// The live WebSocket can't use the page's login, so the page passes this token in its URL.
+// It comes from /api/state, which needs the login, and changes with the password.
+String wsToken;
+void newWsToken() {
+  char b[25];
+  snprintf(b, sizeof(b), "%08lx%08lx%08lx", static_cast<unsigned long>(esp_random()),
+           static_cast<unsigned long>(esp_random()), static_cast<unsigned long>(esp_random()));
+  wsToken = b;
 }
 
 void sendJson(JsonDocument& d, int code = 200) {
@@ -1926,14 +1970,17 @@ bool bodyJson(JsonDocument& d) {
 void buildState(JsonDocument& d, bool lite);
 
 void handleState() {
+  if (!authed(true)) return;
   const bool lite = web.hasArg("lite");  // frequent polls skip frames and calibration history
   JsonDocument d;
   buildState(d, lite);
+  if (net.adminPass.length()) d["ws_token"] = wsToken;
   sendJson(d);
 }
 
 void buildState(JsonDocument& d, bool lite) {
-  d["fw"] = FW_VERSION; d["uptime"] = millis() / 1000; d["heap"] = ESP.getFreeHeap();
+  d["fw"] = FW_VERSION; d["uptime"] = millis() / 1000; d["heap"] = ESP.getFreeHeap(); d["heap_max_block"] = ESP.getMaxAllocHeap();
+  d["admin_set"] = net.adminPass.length() > 0;
   d["rev"] = stateRev; d["brand"] = net.brand; d["lite"] = lite;
   d["safe_mode"] = safeMode; d["wind"] = windActive;
   JsonArray scl = d["scenes"].to<JsonArray>();
@@ -2032,7 +2079,7 @@ void pushLive() {
 }
 
 void handleConfigGet() {
-  if (!authed()) return;
+  if (!authed(true)) return;
   JsonDocument d;
   JsonObject n = d["network"].to<JsonObject>();
   n["ssid"] = net.ssid; n["pass_set"] = net.pass.length() > 0; n["hostname"] = net.hostname;
@@ -2052,13 +2099,27 @@ void handleConfigGet() {
 void scheduleReboot(uint32_t ms = 1500) { rebootPending = true; rebootAtMs = millis() + ms; }
 
 void handleNetworkPost() {
-  if (!authed()) return;
+  if (!authed(true)) return;
   JsonDocument d; if (!bodyJson(d)) return;
+  if (!net.adminPass.length()) {
+    for (const char* k : {"mqtt_host", "mqtt_port", "mqtt_user", "mqtt_pass", "base_topic", "discovery_prefix"})
+      if (!d[k].isNull()) { sendError(kNeedPassword, 403); return; }
+  }
+  const bool passChange = d["admin_pass"].is<const char*>();
+  if (passChange && net.adminPass.length() && String(d["admin_current"] | "") != net.adminPass) {
+    sendError("the current admin password is wrong", 403);
+    return;
+  }
   bool reboot = false;
   if (d["ssid"].is<const char*>()) { String v = d["ssid"].as<String>(); if (v != net.ssid) { net.ssid = v; reboot = true; } }
   if (d["pass"].is<const char*>() && d["pass"].as<String>().length()) { net.pass = d["pass"].as<String>(); reboot = true; }
   if (d["hostname"].is<const char*>()) { String v = slug(d["hostname"].as<String>()); v.replace("_", "-"); if (v != net.hostname) { net.hostname = v; reboot = true; } }
-  if (d["admin_pass"].is<const char*>()) net.adminPass = d["admin_pass"].as<String>();
+  if (passChange) {
+    net.adminPass = d["admin_pass"].as<String>();
+    newWsToken();
+    ws.disconnect();  // open pages reconnect with the new token
+    LOGI(net.adminPass.length() ? "Admin password set" : "Admin password cleared: the page is back to Wi-Fi setup only");
+  }
   if (d["mqtt_host"].is<const char*>()) net.mqttHost = d["mqtt_host"].as<String>();
   if (d["mqtt_port"].is<int>()) net.mqttPort = d["mqtt_port"];
   if (d["mqtt_user"].is<const char*>()) net.mqttUser = d["mqtt_user"].as<String>();
@@ -2136,7 +2197,7 @@ void handleCommandPost() {
   sendOk();
 }
 
-void handleTestPost() {  // send a raw action on any channel(s) — handy before blinds are set up
+void handleTestPost() {  // send a raw action on any channel(s): handy before blinds are set up
   if (!authed()) return;
   JsonDocument d; if (!bodyJson(d)) return;
   const uint16_t mask = parseChannels(d["channels"] | "");
@@ -2255,7 +2316,7 @@ void handleMqttTest() {
 
 // Wi-Fi scan for the setup page: first call starts an async scan, later calls return results
 void handleScan() {
-  if (!authed()) return;
+  if (!authed(true)) return;
   const int16_t n = WiFi.scanComplete();
   JsonDocument d;
   if (n == WIFI_SCAN_RUNNING) { d["scanning"] = true; }
@@ -2469,36 +2530,70 @@ void handleSomfyPost() {
 }
 
 // Frequency scan: while someone holds a button on the hand remote, measure the
-// signal across 433.42-434.42 MHz and report where it's strongest.
-void handleFreqScan() {
-  if (!authed()) return;
-  if (!radioReady) { sendError("the radio isn't working"); return; }
-  if (anyMoving()) { sendError("wait until the blinds stop", 409); return; }
-  JsonDocument d;
-  JsonArray pts = d["points"].to<JsonArray>();
-  float best = pins.mhz; int bestRssi = -200;
-  rxStop();
-  ELECHOUSE_cc1101.setRxBW(270.0f);  // narrow, so the peak shows where the remote really is
-  for (float f = 433.42f; f <= 434.425f; f += 0.05f) {
-    ELECHOUSE_cc1101.setMHZ(f);
-    ELECHOUSE_cc1101.SetRx(f);
-    int peak = -200;
-    const uint32_t t0 = millis();
-    while (millis() - t0 < 180) { peak = max(peak, ELECHOUSE_cc1101.getRssi()); delay(2); }
-    JsonObject o = pts.add<JsonObject>(); o["mhz"] = f; o["rssi"] = peak;
-    if (peak > bestRssi) { bestRssi = peak; best = f; }
-  }
+// signal across 433.42-434.42 MHz and report where it's strongest. One 180 ms step
+// at a time from loop(), so the page, MQTT and blind timing keep running meanwhile.
+constexpr int kScanSteps = 21;  // 50 kHz apart
+int scanStep = -1;              // -1 idle, 0..kScanSteps-1 measuring, kScanSteps finished
+int scanRssi[kScanSteps];
+uint32_t scanStepMs = 0, scanDoneMs = 0, scanTxMs = 0;
+String scanErr;
+float scanMhz(int k) { return 433.42f + 0.05f * k; }
+
+void finishFreqScan(const char* err) {
+  scanErr = err ? err : "";
+  scanStep = kScanSteps;
+  scanDoneMs = millis();
   rxBwNow = 0;  // rxStart() puts the bandwidth and frequency back
   rxStart();
-  d["best_mhz"] = best; d["best_rssi"] = bestRssi; d["current_mhz"] = pins.mhz;
-  LOGI("Frequency scan: strongest at %.2f MHz (%d dBm)", best, bestRssi);
+}
+
+void stepFreqScan() {
+  if (scanStep < 0 || scanStep >= kScanSteps) return;
+  // a command sent mid-scan retunes the radio, so the rest of the readings would be wrong
+  if (lastTxMs != scanTxMs) { finishFreqScan("a blind was sent a command during the scan: scan again"); return; }
+  scanRssi[scanStep] = max(scanRssi[scanStep], ELECHOUSE_cc1101.getRssi());
+  if (millis() - scanStepMs < 180) return;
+  if (++scanStep == kScanSteps) { finishFreqScan(nullptr); return; }
+  ELECHOUSE_cc1101.setMHZ(scanMhz(scanStep));
+  ELECHOUSE_cc1101.SetRx(scanMhz(scanStep));
+  scanRssi[scanStep] = -200;
+  scanStepMs = millis();
+}
+
+// The page calls this until `scanning` is false: the first call starts, the last one gets the result.
+void handleFreqScan() {
+  if (!authed()) return;
+  JsonDocument d;
+  if (scanStep >= 0 && scanStep < kScanSteps) { d["scanning"] = true; sendJson(d); return; }
+  if (scanStep == kScanSteps && millis() - scanDoneMs < 30000) {
+    scanStep = -1;
+    if (scanErr.length()) { sendError(scanErr, 409); return; }
+    JsonArray pts = d["points"].to<JsonArray>();
+    float best = pins.mhz; int bestRssi = -200;
+    for (int k = 0; k < kScanSteps; ++k) {
+      JsonObject o = pts.add<JsonObject>(); o["mhz"] = scanMhz(k); o["rssi"] = scanRssi[k];
+      if (scanRssi[k] > bestRssi) { bestRssi = scanRssi[k]; best = scanMhz(k); }
+    }
+    d["scanning"] = false; d["best_mhz"] = best; d["best_rssi"] = bestRssi; d["current_mhz"] = pins.mhz;
+    LOGI("Frequency scan: strongest at %.2f MHz (%d dBm)", best, bestRssi);
+    sendJson(d);
+    return;
+  }
+  if (!radioReady) { sendError("the radio isn't working"); return; }
+  if (anyMoving()) { sendError("wait until the blinds stop", 409); return; }
+  rxStop();
+  ELECHOUSE_cc1101.setRxBW(270.0f);  // narrow, so the peak shows where the remote really is
+  ELECHOUSE_cc1101.setMHZ(scanMhz(0));
+  ELECHOUSE_cc1101.SetRx(scanMhz(0));
+  scanStep = 0; scanRssi[0] = -200; scanStepMs = millis(); scanTxMs = lastTxMs;
+  d["scanning"] = true;
   sendJson(d);
 }
 
-void handleReboot() { if (!authed()) return; LOGI("Restart requested from the web page"); sendOk(); scheduleReboot(800); }
+void handleReboot() { if (!authed(true)) return; LOGI("Restart requested from the web page"); sendOk(); scheduleReboot(800); }
 
 void handleLog() {
-  if (!authed()) return;
+  if (!authed(true)) return;
   const uint32_t after = web.hasArg("after") ? strtoul(web.arg("after").c_str(), nullptr, 10) : 0;
   const bool text = web.hasArg("format") && web.arg("format") == "text";
   const uint32_t first = logSeq > kLogLines ? logSeq - kLogLines + 1 : 1;
@@ -2534,16 +2629,16 @@ void handleUpdateDone() {
   const bool ok = updateAllowed && !Update.hasError();
   updateAllowed = false;
   if (ok) LOGI("Firmware updated, restarting"); else LOGE("Firmware update failed: %s", Update.errorString());
-  web.send(ok ? 200 : 500, "text/plain", ok ? "Update OK — rebooting" : "Update failed");
+  web.send(ok ? 200 : 500, "text/plain", ok ? "Update OK, restarting" : "Update failed");
   if (ok) scheduleReboot(1000);
 }
 
 void handleUpdateUpload() {
   HTTPUpload& up = web.upload();
   if (up.status == UPLOAD_FILE_START) {
-    updateAllowed = web.header("X-Bridge") == "1" &&
-                    (!net.adminPass.length() || web.authenticate("admin", net.adminPass.c_str()));
-    if (!updateAllowed) { LOGW("Refused a firmware upload that didn't come from the bridge's own page"); return; }
+    updateAllowed = web.header("X-Bridge") == "1" && hostAllowed(web.hostHeader()) &&
+                    net.adminPass.length() && web.authenticate("admin", net.adminPass.c_str());
+    if (!updateAllowed) { LOGW("Refused a firmware upload: it needs the admin password, set from the bridge's own page"); return; }
     LOGI("Firmware upload started: %s", up.filename.c_str());
     rxStop();
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
@@ -2629,12 +2724,24 @@ void setupWeb() {
   }
   web.onNotFound(handleNotFound);
   web.begin();
+  newWsToken();
+  static const char* kWsHeaders[] = {"Host"};
+  ws.onValidateHttpHeader([](String name, String value) { return !name.equalsIgnoreCase("Host") || hostAllowed(value); },
+                          kWsHeaders, 1);
   ws.begin();
-  ws.onEvent([](uint8_t, WStype_t type, uint8_t*, size_t) { if (type == WStype_CONNECTED) lastWsRev = 0; });
+  ws.onEvent([](uint8_t num, WStype_t type, uint8_t* url, size_t len) {
+    if (type != WStype_CONNECTED) return;
+    // with a password set, only pages that passed the login (and so have the token) get the state
+    if (net.adminPass.length() && String(reinterpret_cast<const char*>(url), len).indexOf("t=" + wsToken) < 0) {
+      ws.disconnect(num);
+      return;
+    }
+    lastWsRev = 0;
+  });
 }
 
 // ---------------------------------------------------------------- Improv Wi-Fi (serial)
-// https://www.improv-wifi.com/serial/ — lets the web installer ask for Wi-Fi straight after flashing.
+// https://www.improv-wifi.com/serial/: lets the web installer ask for Wi-Fi straight after flashing.
 namespace improv {
 enum : uint8_t { TypeState = 1, TypeError = 2, TypeRpc = 3, TypeRpcResult = 4 };
 enum : uint8_t { StateReady = 2, StateProvisioning = 3, StateProvisioned = 4 };
@@ -2786,6 +2893,7 @@ void maintainWifi() {
   static bool wasUp = false;
   if (up != wasUp) {
     wasUp = up;
+    if (up && WiFi.status() == WL_CONNECTED) WiFi.setSleep(false);  // modem sleep holds incoming MQTT commands until the next wake-up
     if (up) LOGI("Wi-Fi connected to %s, IP %s, signal %d dBm", net.ssid.c_str(), netIp().toString().c_str(), WiFi.RSSI());
     else if (net.ssid.length()) LOGW("Wi-Fi disconnected from %s", net.ssid.c_str());
   }
@@ -2807,7 +2915,7 @@ void maintainWifi() {
 #endif
   } else if (net.ssid.length() && !apMode && millis() - staStartMs > 45000) {
     LOGW("Can't join %s after 45 s: opening the setup Wi-Fi as well", net.ssid.c_str());
-    startAp();  // can't join — open the setup portal but keep trying the home network
+    startAp();  // can't join: open the setup portal but keep trying the home network
   }
   if (apMode) dns.processNextRequest();
 }
@@ -2876,6 +2984,7 @@ void loop() {
   finishPress();
   checkSchedules();
   stepPairing();
+  stepFreqScan();
   ws.loop();
   pushLive();
   if (crashCount && millis() > 120000) crashCount = 0;  // ran for 2 minutes: the crash streak is over

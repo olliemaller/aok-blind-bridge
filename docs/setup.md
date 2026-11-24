@@ -8,7 +8,7 @@ If you skip the Wi-Fi step, the bridge opens a setup network called **AOK-Blinds
 
 ## 2. Open the dashboard
 
-Browse to `http://aok-blinds.local`, or the IP address your router shows for it. The pills at the top show Wi-Fi, Home Assistant, the radio and the remote. Click one to jump to its settings.
+Browse to `http://aok-blinds.local`, or the IP address your router shows for it. Set an admin password in the banner at the top: until you do, the page only does Wi-Fi setup. The pills at the top show Wi-Fi, Home Assistant, the radio and the remote. Click one to jump to its settings.
 
 If **Radio** is red, the ESP32 can't talk to the CC1101. Check that VCC goes to 3V3, then check SCK, MISO, MOSI and CSN. MISO and MOSI swapped is the usual mistake.
 
@@ -27,7 +27,7 @@ If **Radio** is red, the ESP32 can't talk to the CC1101. Check that VCC goes to 
 - **Opening and closing time.** The Calibrate tab measures these.
 - **Named positions.** Up to four, each with a name and %, shown as buttons on the blind and in Home Assistant.
 - **Tilt time.** For venetian blinds: how long the slats take to turn from closed to open. Adds a tilt slider in Home Assistant.
-- **Start-up delay.** How long the motor takes to start after a command (usually 0.3–1 s). Set it if short moves stop short of the target.
+- **Start-up delay.** How long the motor takes to start after a command (usually 0.3 to 1 s). Set it if short moves stop short of the target.
 - **Favourite position** (optional). The ★ button sends the blind there.
 - **Reversed.** Tick it if Up closes this blind.
 
@@ -62,7 +62,7 @@ Each measurement is saved and added to the calibration log. Do it again any time
 
 - **Blind brand.** Sets the name used in the title, the setup Wi-Fi and Home Assistant, for example `Motolux`.
 - **Time zone.** Set automatically from your browser the first time. It's used for log and calibration times.
-- **Web page password.** Adds a login (user `admin`) to the page. Set one: until you do, the dashboard shows a warning, and over-the-air updates from PlatformIO (`espota`) stay off. Updates from the page itself always work.
+- **Admin password.** Adds a login (user `admin`) to the page. From 1.8.0 the page only does Wi-Fi setup until one is set: a banner on every tab asks for it, and the other buttons answer with a message saying to set it. Home Assistant and MQTT keep working either way. Over-the-air updates (from the page or from PlatformIO `espota`) need it. To change or remove it, type the current password in *Current admin password* first.
 - **Backup.** Downloads your blinds, remote codes, pins and settings (no passwords). **Restore from file** loads them onto another board.
 - **Logs.** The last 120 events: commands, remote presses, connections, calibrations and errors. Download them when reporting a problem.
 
@@ -78,7 +78,7 @@ Each measurement is saved and added to the calibration log. Do it again any time
 
 - **Pair motors to the bridge (experimental):** gives a channel the bridge's own remote ID, so the motor keeps working from Home Assistant if the hand remote is lost. Press **P** on the hand remote once so the bridge learns it, then **Pair automatically** (the motor jogs three times). Or press P twice on the hand remote yourself and use **Pair now**.
 - **Repeat the hand remote:** the bridge sends every press again, for a motor at the edge of the remote's range.
-- **Frequency scan:** hold a remote button and press **Scan**. The bridge measures 433.42–434.42 MHz and offers to tune to where your remote is strongest.
+- **Frequency scan:** hold a remote button and press **Scan**. The bridge measures 433.42 to 434.42 MHz and offers to tune to where your remote is strongest.
 
 ## Ethernet (WT32-ETH01)
 

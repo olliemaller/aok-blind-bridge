@@ -260,6 +260,7 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
 </header>
 
 <main>
+<div id="pwGate"></div>
 <!-- ============ BLINDS ============ -->
 <section id="s-blinds">
   <div class="stack">
@@ -517,9 +518,10 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
             <div class="field"><span>Blind brand</span><input type="text" id="n_brand" maxlength="24" placeholder="A-OK"><small>Shown in the title, the setup Wi-Fi name and Home Assistant.</small></div>
             <div class="field"><span>Time zone</span><select id="n_tz"></select><small>For log and calibration times.</small></div>
             <div class="field"><span>Device name</span><input type="text" id="n_hostname" spellcheck="false"><small id="hostHint"></small></div>
-            <div class="field"><span>Web page password</span><input type="password" id="n_admin" placeholder="None" autocomplete="new-password"><small>User name is <span class="mono">admin</span>. Leave blank for none.</small></div>
+            <div class="field"><span>Admin password</span><input type="password" id="n_admin" placeholder="None" autocomplete="new-password"><small>User name is <span class="mono">admin</span>. Leave blank to keep the current one.</small></div>
+            <div class="field" id="adminCurRow" style="display:none"><span>Current admin password</span><input type="password" id="n_admin_cur" autocomplete="current-password"><small>Needed to change or remove the password.</small></div>
           </div>
-          <div class="btns"><button class="btn pri" onclick="saveNet('device')">Save</button></div>
+          <div class="btns"><button class="btn pri" onclick="saveNet('device')">Save</button><button class="btn ghost dng" id="adminClear" style="display:none" onclick="clearPass()">Remove password</button></div>
         </div>
       </div>
     </div>
@@ -629,11 +631,11 @@ function go(t,anchor){
 function moving(){return S&&(S.blinds.some(b=>b.motion!='stopped')||S.calibration.active||S.remote.learning)}
 let autoTzDone=false;
 let fullRev=-1,heavy={frames:[],cal_history:[]};
-let ws=null,wsOk=false,wsTried=0;
+let ws=null,wsOk=false,wsTried=0,wsToken='';
 function liveConnect(){
   if(ws||!S||!S.live||!('WebSocket' in window)||Date.now()-wsTried<10000)return;
   wsTried=Date.now();
-  try{ws=new WebSocket(`ws://${location.hostname}:81/`)}catch(e){ws=null;return}
+  try{ws=new WebSocket(`ws://${location.hostname}:81/?t=${wsToken}`)}catch(e){ws=null;return}
   ws.onopen=()=>{wsOk=true};
   ws.onmessage=e=>{let j;try{j=JSON.parse(e.data)}catch(x){return}
     if(j.rev!==fullRev){refresh(true);return}
@@ -646,7 +648,7 @@ async function refresh(now){
     // light poll; the full state (frames, calibration log) only when something in it changed
     let r=await fetch('/api/state?lite=1',{cache:'no-store'});
     if(r.ok){
-      let j=await r.json();
+      let j=await r.json();if(j.ws_token)wsToken=j.ws_token;
       if(j.rev!==fullRev){const f=await fetch('/api/state',{cache:'no-store'});if(f.ok){j=await f.json();fullRev=j.rev;heavy={frames:j.frames||[],cal_history:j.cal_history||[]}}}
       S=Object.assign(j,heavy);lastFetch=performance.now();anchorAll();render();
     }
@@ -703,6 +705,7 @@ function render(){
   $('devname').textContent=S.wifi.ap?'Setup mode':(S.wifi.hostname||'')+(S.wifi.connected?' · '+S.wifi.ip:'');
   pill('pWifi',S.wifi.ap?'warn':S.wifi.connected?'ok':'bad',S.wifi.ap?'Setup Wi-Fi':S.wifi.connected?'Wi-Fi':'Wi-Fi offline');
   pill('pMqtt',!S.mqtt.configured?'warn':S.mqtt.connected?'ok':'bad',!S.mqtt.configured?'Home Assistant not set':S.mqtt.connected?'Home Assistant':'Home Assistant offline');
+  drawGate();
   pill('pRadio',S.radio.ready?'ok':'bad',S.radio.ready?'Radio':'Radio missing');
   if(!needAok()&&!S.remote.complete)pill('pRemote','ok','Somfy');else pill('pRemote',S.remote.complete?'ok':S.remote.learning?'warn':'warn',S.remote.complete?'Remote':S.remote.learning?'Learning…':'Remote not learned');
   drawNav();
@@ -712,6 +715,25 @@ function render(){
   if(tab=='cal')drawCal();
   if(tab=='activity')drawActivity();
   if(tab=='settings')drawStatus();
+}
+// No admin password: the bridge only does Wi-Fi setup, so ask for one on every tab.
+let gateOn=null;
+function drawGate(){
+  const on=S.admin_set===false&&!S.wifi.ap;if(on===gateOn)return;gateOn=on;
+  $('pwGate').innerHTML=on?`<div class="banner warn" style="display:block;margin-bottom:16px"><b>Set an admin password to use this page.</b> Until it has one, the bridge only does Wi-Fi setup here, so nobody else on your network can move the blinds or change the settings. Home Assistant and MQTT keep working as before.
+    <div class="grid2" style="margin-top:10px"><input type="password" id="gNew" placeholder="New password" autocomplete="new-password"><input type="password" id="gNew2" placeholder="Type it again" autocomplete="new-password"></div>
+    <div class="btns" style="margin-top:8px;align-items:center"><button class="btn pri sm" onclick="setFirstPass()">Set password</button><span class="small">The user name is <span class="mono">admin</span>. Your browser asks for it next.</span></div></div>`:'';
+}
+async function setFirstPass(){
+  const a=$('gNew').value,b=$('gNew2').value;
+  if(a.length<8)return toast('Use at least 8 characters',true);
+  if(a!==b)return toast('The two passwords don\'t match',true);
+  if(await api('/api/network',{admin_pass:a})){toast('Password set');setTimeout(()=>location.reload(),800)}
+}
+async function clearPass(){
+  const cur=$('n_admin_cur').value;if(!cur)return toast('Type the current password first',true);
+  if(!confirm('Remove the admin password? Until a new one is set, this page only does Wi-Fi setup. Home Assistant keeps working.'))return;
+  if(await api('/api/network',{admin_pass:'',admin_current:cur})){toast('Password removed');setTimeout(()=>location.reload(),800)}
 }
 function pill(id,cls,label){const e=$(id);e.className='pill '+cls;e.querySelector('.lbl').textContent=label;e.title=label}
 
@@ -723,7 +745,6 @@ function drawBlinds(){
   if(S.wind)al.push(banner('warn','alert','<b>Wind alarm.</b> Awnings are retracted and held until the wind drops.'));
   if(!S.radio.ready&&!S.safe_mode)al.push(banner('bad','alert','<b>The radio isn\'t responding.</b> Check the CC1101 wiring.','Wiring',"go('settings','set-radio')"));
   if(!S.remote.complete&&!(S.blinds.length&&S.blinds.every(isSomfy)))al.push(banner('warn','remote','<b>Learn your remote first.</b> The bridge copies it to control the blinds.','Learn remote',"go('remote')"));
-  if(C&&C.network&&!C.network.admin_set&&!(S.wifi&&S.wifi.ap))al.push(banner('warn','alert','<b>No admin password.</b> Anyone on your network can open this page, move the blinds and change the settings. Over-the-air updates from PlatformIO stay off until you set one.','Set password',"go('settings')"));
   $('blindAlerts').innerHTML=al.join('');
   const list=$('blindList');
   $('allBar').innerHTML=S.blinds.length>1?`<div class="card allbar"><b>All blinds</b>
@@ -787,7 +808,7 @@ function paintBlind(el,b,p){
   const html=(mv?`<svg class="arrow"><use href="#i-${a.motion=='opening'?'up':'down'}"/></svg>`:'')+esc(txt);
   if(st._h!==html){st.innerHTML=html;st._h=html}
   const r=el.querySelector('input[type=range]');
-  if(dragging!==b.id){if(known&&document.activeElement!==r)r.value=pos;el.querySelector('.pct').textContent=known?pos+'%':'–'}
+  if(dragging!==b.id){if(known&&document.activeElement!==r)r.value=pos;el.querySelector('.pct').textContent=known?pos+'%':'-'}
 }
 function toggleMenu(id,e){e.stopPropagation();const m=$('m-'+id),open=!m.classList.contains('open');document.querySelectorAll('.menu.open').forEach(x=>x.classList.remove('open'));if(open)m.classList.add('open')}
 document.addEventListener('click',()=>document.querySelectorAll('.menu.open').forEach(x=>x.classList.remove('open')));
@@ -830,8 +851,12 @@ function pair(action){const ch=parseInt($('pairCh').value);
   api('/api/pair',{action,channel:ch})}
 async function freqScan(){
   const b=$('btnScan');b.disabled=true;$('scanMsg').textContent='Hold a remote button… scanning';
-  try{const r=await fetch('/api/freqscan',{method:'POST',headers:{'Content-Type':'application/json','X-Bridge':'1'},body:'{}'});const j=await r.json();
+  try{let r,j;
+    // the bridge scans in the background: ask again until it has the result
+    for(let i=0;i<30;i++){r=await fetch('/api/freqscan',{method:'POST',headers:{'Content-Type':'application/json','X-Bridge':'1'},body:'{}'});j=await r.json();
+      if(!r.ok||!j.scanning)break;await new Promise(x=>setTimeout(x,500))}
     if(!r.ok){$('scanMsg').textContent=cap(j.error||'Scan failed');return}
+    if(j.scanning){$('scanMsg').textContent='The scan didn\'t finish. Try again.';return}
     const diff=Math.abs(j.best_mhz-j.current_mhz)>0.02;
     $('scanMsg').innerHTML=`Strongest at <b>${j.best_mhz.toFixed(2)} MHz</b> (${j.best_rssi} dBm). Now on ${j.current_mhz.toFixed(2)} MHz.`+
       (diff&&j.best_rssi>-85?` <button class="btn sm" onclick="api('/api/pins',{mhz:${j.best_mhz.toFixed(2)}}).then(x=>x&&toast('Saved. Restarting…'))">Use ${j.best_mhz.toFixed(2)} MHz</button>`:diff?' Too weak to be sure: hold the button closer and scan again.':' Already tuned.');
@@ -855,7 +880,7 @@ function drawEditors(){
   if(!edit)return;
   const seen=chList(S?S.remote.seen:'');
   $('editors').innerHTML=edit.length?edit.map((b,i)=>`<div class="card ed ${openEd.has(b._k)?'open':''}">
-    <div class="edh" onclick="toggleEd('${b._k}')">${icon('blind')}<b>${esc(b.name||'Unnamed blind')}</b>${isSomfy(b)?'<span class="tag">Somfy</span>':`${chList(b.channels).length>1?'<span class="tag">Group</span>':''}<span class="tag">Ch ${esc(b.channels||'–')}</span>`}
+    <div class="edh" onclick="toggleEd('${b._k}')">${icon('blind')}<b>${esc(b.name||'Unnamed blind')}</b>${isSomfy(b)?'<span class="tag">Somfy</span>':`${chList(b.channels).length>1?'<span class="tag">Group</span>':''}<span class="tag">Ch ${esc(b.channels||'-')}</span>`}
       ${b.room?`<span class="faint small">${esc(b.room)}</span>`:''}<span class="meta">${secs(b.open_ms)} s up · ${secs(b.close_ms)} s down${b.favourite>=0?' · ★ '+b.favourite+'%':''}${b.invert?' · reversed':''}</span><svg class="chev"><use href="#i-down"/></svg></div>
     <div class="edb"><div class="row1"><input type="text" value="${esc(b.name)}" placeholder="Name, e.g. Lounge left" oninput="edit[${i}].name=this.value;markDirty();this.closest('.ed').querySelector('.edh b').textContent=this.value||'Unnamed blind'">
       <button class="btn ghost dng sm" title="Remove" onclick="edit.splice(${i},1);markDirty();drawEditors()">${icon('x')}Remove</button></div>
@@ -873,7 +898,7 @@ function drawEditors(){
       <label class="field"><span>${isSomfy(b)?'My position (%)':'Favourite position (%)'}</span><input type="number" min="0" max="100" placeholder="None" value="${b.favourite>=0?b.favourite:''}" oninput="edit[${i}].favourite=this.value===''?-1:Math.max(0,Math.min(100,parseInt(this.value)||0));markDirty()">${isSomfy(b)?'<small>Where the motor goes on My. Leave empty if it has none.</small>':''}</label>
     </div>
     <span class="lab" style="margin-top:6px">Named positions <span class="faint">(buttons here and in Home Assistant)</span></span>
-    <div class="grid3">${[0,1,2,3].map(k=>{const x=(b.presets||[])[k]||{};return `<label class="field"><span>Name</span><input type="text" value="${esc(x.name||'')}" placeholder="e.g. Privacy" oninput="setPreset(${i},${k},'name',this.value)"></label><label class="field"><span>Position (%)</span><input type="number" min="0" max="100" value="${x.position!=null?x.position:''}" placeholder="–" oninput="setPreset(${i},${k},'position',this.value)"></label>${k%1==0?'<span></span>':''}`}).join('')}</div>
+    <div class="grid3">${[0,1,2,3].map(k=>{const x=(b.presets||[])[k]||{};return `<label class="field"><span>Name</span><input type="text" value="${esc(x.name||'')}" placeholder="e.g. Privacy" oninput="setPreset(${i},${k},'name',this.value)"></label><label class="field"><span>Position (%)</span><input type="number" min="0" max="100" value="${x.position!=null?x.position:''}" placeholder="-" oninput="setPreset(${i},${k},'position',this.value)"></label>${k%1==0?'<span></span>':''}`}).join('')}</div>
     <div class="btns">
       <label class="field" style="margin:0;min-width:150px"><span>Type in Home Assistant</span><select onchange="edit[${i}].device_class=this.value;markDirty()">${['shade','blind','curtain','awning','shutter'].map(t=>`<option value="${t}" ${t==b.device_class?'selected':''}>${cap(t)}</option>`).join('')}</select></label>
       <label class="switch" style="margin-top:18px"><input type="checkbox" ${b.invert?'checked':''} onchange="edit[${i}].invert=this.checked;markDirty()"><span class="small">Reversed <span class="faint">(Up closes it)</span></span></label>
@@ -1011,7 +1036,7 @@ function drawCal(){
   $('calDone').disabled=$('calCancel').disabled=!c.active;
   $('calTimes').innerHTML=S.blinds.length?'<tr><th>Blind</th><th class="num">Opening</th><th class="num">Closing</th><th>Last calibrated</th></tr>'+S.blinds.map(x=>{const h=[...S.cal_history].reverse().find(r=>r.name==x.name);return `<tr><td>${esc(x.name)}</td><td class="num">${secs(x.open_ms)} s</td><td class="num">${secs(x.close_ms)} s</td><td class="faint small">${h?(h.when?clock(h.when):'Earlier'):'Never'}</td></tr>`}).join(''):'<tr><td class="faint">No blinds yet</td></tr>';
   const hist=[...S.cal_history].reverse();
-  $('calHist').innerHTML=hist.length?'<tr><th>When</th><th>Blind</th><th>Direction</th><th class="num">Time</th><th class="num">Change</th></tr>'+hist.map(r=>{const d=r.previous_ms?(r.ms-r.previous_ms)/1000:0;return `<tr><td class="faint small">${r.when?clock(r.when):'–'}</td><td>${esc(r.name)}</td><td>${r.direction=='open'?'Opening':'Closing'}</td><td class="num"><b>${secs(r.ms)} s</b></td><td class="num small delta ${d>0?'up':d<0?'down':''}">${!r.previous_ms?'–':Math.abs(d)<0.05?'no change':(d>0?'+':'')+d.toFixed(1)+' s'}</td></tr>`}).join(''):'<tr><td class="faint">Calibrations you do appear here.</td></tr>';
+  $('calHist').innerHTML=hist.length?'<tr><th>When</th><th>Blind</th><th>Direction</th><th class="num">Time</th><th class="num">Change</th></tr>'+hist.map(r=>{const d=r.previous_ms?(r.ms-r.previous_ms)/1000:0;return `<tr><td class="faint small">${r.when?clock(r.when):'-'}</td><td>${esc(r.name)}</td><td>${r.direction=='open'?'Opening':'Closing'}</td><td class="num"><b>${secs(r.ms)} s</b></td><td class="num small delta ${d>0?'up':d<0?'down':''}">${!r.previous_ms?'-':Math.abs(d)<0.05?'no change':(d>0?'+':'')+d.toFixed(1)+' s'}</td></tr>`}).join(''):'<tr><td class="faint">Calibrations you do appear here.</td></tr>';
 }
 async function cal(a){
   const id=$('calBlind').value;
@@ -1073,6 +1098,7 @@ function fillSettings(){
   ['ssid','hostname','mqtt_host','mqtt_port','mqtt_user','base_topic','discovery_prefix'].forEach(k=>{const e=$('n_'+k);if(document.activeElement!==e&&!e.dataset.touched)e.value=n[k]??''});
   $('passSet').textContent=n.pass_set?'(saved)':'';$('mqttPassSet').textContent=n.mqtt_pass_set?'(saved)':'';
   $('n_admin').placeholder=n.admin_set?'Password set: type a new one to change':'None';
+  $('adminCurRow').style.display=$('adminClear').style.display=n.admin_set?'':'none';
   if(document.activeElement!==$('n_brand')&&!$('n_brand').dataset.touched)$('n_brand').value=n.brand||'';
   const tzSel=$('n_tz');
   if(!tzSel.options.length)tzSel.innerHTML=TZS.map(([z])=>`<option value="${z}">${z.replace(/_/g,' ').replace('/',' / ')}</option>`).join('');
@@ -1095,7 +1121,7 @@ function drawStatus(){
   $('radioMsg').innerHTML=r.ready?'':banner('bad','alert','<b>The ESP32 can\'t talk to the CC1101.</b> Check VCC is on 3V3, then SCK, MISO, MOSI and CSN. MISO and MOSI swapped is the usual cause.');
   $('radioKv').innerHTML=`<dt>Frequency</dt><dd>${(+r.mhz).toFixed(2)} MHz</dd><dt>Last sent</dt><dd>${r.last_tx_ago_s>=0?ago(r.last_tx_ago_s):'Not yet'}</dd><dt>Last heard</dt><dd>${r.last_rx_ago_s>=0?ago(r.last_rx_ago_s):'Nothing yet'}</dd>${r.overflow?`<dt>Dropped signals</dt><dd>${r.overflow}</dd>`:''}`;
   const reasons={1:'Power on',3:'Software restart',4:'Crash',5:'Crash',6:'Watchdog',7:'Watchdog',8:'Deep sleep',9:'Low voltage',10:'Other'};
-  $('fwKv').innerHTML=`<dt>Version</dt><dd>${esc(S.fw)}</dd><dt>Running for</dt><dd>${dur(S.uptime)}</dd><dt>Last start</dt><dd>${reasons[S.reset_reason]||'Unknown'}</dd><dt>Free memory</dt><dd>${Math.round(S.heap/1024)} kB</dd><dt>IP address</dt><dd>${esc(w.connected?w.ip:'192.168.4.1 (setup)')}</dd>`;
+  $('fwKv').innerHTML=`<dt>Version</dt><dd>${esc(S.fw)}</dd><dt>Running for</dt><dd>${dur(S.uptime)}</dd><dt>Last start</dt><dd>${reasons[S.reset_reason]||'Unknown'}</dd><dt>Free memory</dt><dd>${Math.round(S.heap/1024)} kB${S.heap_max_block?` (largest block ${Math.round(S.heap_max_block/1024)} kB)`:''}</dd><dt>IP address</dt><dd>${esc(w.connected?w.ip:'192.168.4.1 (setup)')}</dd>`;
 }
 async function scan(){
   const b=$('scanBtn'),sel=$('scanSel');b.disabled=true;b.textContent='Scanning…';
@@ -1106,10 +1132,10 @@ async function scan(){
   b.disabled=false;b.textContent='Scan';
 }
 async function saveNet(which){
-  const b={},v=k=>$('n_'+k).value.trim();
+  const b={},v=k=>$('n_'+k).value.trim(),n=C?C.network:{};
   if(which=='wifi'){if(!v('ssid'))return toast('Enter the network name',true);b.ssid=v('ssid');if($('n_pass').value)b.pass=$('n_pass').value}
   if(which=='mqtt'){b.mqtt_host=v('mqtt_host');b.mqtt_port=parseInt(v('mqtt_port'))||1883;b.mqtt_user=v('mqtt_user');if($('n_mqtt_pass').value)b.mqtt_pass=$('n_mqtt_pass').value;b.base_topic=v('base_topic');b.discovery_prefix=v('discovery_prefix')}
-  if(which=='device'){b.hostname=v('hostname');b.brand=v('brand')||'A-OK';const z=TZS.find(t=>t[0]==$('n_tz').value);if(z){b.tz=z[1];b.tz_name=z[0]}if($('n_admin').value)b.admin_pass=$('n_admin').value}
+  if(which=='device'){b.hostname=v('hostname');b.brand=v('brand')||'A-OK';const z=TZS.find(t=>t[0]==$('n_tz').value);if(z){b.tz=z[1];b.tz_name=z[0]}if($('n_admin').value){b.admin_pass=$('n_admin').value;if(n.admin_set){if(!$('n_admin_cur').value)return toast('Type the current admin password to change it',true);b.admin_current=$('n_admin_cur').value}}}
   const j=await api('/api/network',b);
   if(j){toast(j.rebooting?'Saved. Restarting…':'Saved');blindSig='';fullRev=-1;document.querySelectorAll('#s-settings input,#s-settings select').forEach(e=>{delete e.dataset.touched;if(e.type=='password')e.value=''});loadConfig()}
 }

@@ -1,6 +1,6 @@
 # Home Assistant
 
-The bridge uses MQTT discovery. Once it's connected to your broker, the blinds appear under **Settings → Devices & services → MQTT**, with no YAML. Each blind is its own device, so it can sit in its own area. If you set a room for the blind, Home Assistant suggests that area.
+The bridge uses MQTT discovery. MQTT is a simple messaging system: a broker (a small server, usually the Mosquitto add-on on Home Assistant) passes messages between the bridge and Home Assistant, and discovery messages tell Home Assistant which entities exist. Once the bridge is connected to your broker, the blinds appear under **Settings → Devices & services → MQTT**, with no YAML. Each blind is its own device, so it can sit in its own area. If you set a room for the blind, Home Assistant suggests that area.
 
 ## Entities
 
@@ -8,7 +8,7 @@ The bridge uses MQTT discovery. Once it's connected to your broker, the blinds a
 
 | Entity | What it does |
 |---|---|
-| `cover.<blind>` | Open, close, stop, and set position (0–100 %) |
+| `cover.<blind>` | Open, close, stop, and set position (0 to 100 %). With a *Tilt time* set, also a tilt slider |
 | *Favourite position* button | Moves to the favourite % (only if one is set) |
 | *Mark as open* / *Mark as closed* buttons | Set the position without moving the blind |
 | Named position buttons | One per named position (up to 4 per blind, set in *Set up blinds*) |
@@ -21,7 +21,7 @@ The cover's attributes include `channels`, `last_source` (`web`, `home_assistant
 
 | Entity | What it does |
 |---|---|
-| `event.<bridge>_remote_button` | Fires `open`, `close` or `stop` with a `channels` attribute whenever your hand remote is used, and `open_long`, `close_long` or `stop_long` (with `seconds`) when a button was held for 1.5 s or more |
+| `event.<bridge>_remote_button` | Fires `open`, `close` or `stop` with a `channels` attribute whenever your hand remote is used, and `open_long`, `close_long` or `stop_long` (with `seconds`) when a button was held for 1.5 s or more. A followed Somfy remote fires `open`, `close` or `stop` with `somfy_remote` (its address) and `somfy_command` (`up`, `down`, `my` and so on) instead of `channels` |
 | *Remote signal* | Signal strength (dBm) of the last frame from your remotes: below about −90 the bridge is too far away |
 | *Learn remote* button | Starts remote learning |
 | *Last remote press* | The last button and channel heard |
@@ -54,22 +54,30 @@ actions:
 
 | Topic | Direction | Payload |
 |---|---|---|
-| `<base>/<blind>/set` | to bridge | `OPEN`, `CLOSE`, `STOP`, `FAVOURITE`, `SYNC_OPEN`, `SYNC_CLOSE` or `0`–`100` |
-| `<base>/<blind>/set_position` | to bridge | `0`–`100` |
+| `<base>/<blind>/set` | to bridge | `OPEN`, `CLOSE`, `STOP`, `FAVOURITE`, `SYNC_OPEN`, `SYNC_CLOSE` or `0` to `100` |
+| `<base>/<blind>/set_position` | to bridge | `0` to `100` |
 | `<base>/all/set` | to bridge | `OPEN`, `CLOSE` or `STOP` for every blind at once |
 | `<base>/learn/set` | to bridge | `START` |
-| `<base>/<blind>/set` | to bridge | also `PRESET:1`–`PRESET:4` or `PRESET:<name>`, `LOCK`, `UNLOCK` |
+| `<base>/<blind>/set` | to bridge | also `PRESET:1` to `PRESET:4` or `PRESET:<name>`, `LOCK`, `UNLOCK` |
 | `<base>/<blind>/lock/set` | to bridge | `ON` or `OFF` |
+| `<base>/<blind>/tilt/set` | to bridge | `0` (closed) to `100` (open). Only for blinds with a *Tilt time*. `TILT:<0-100>` on `<base>/<blind>/set` does the same |
 | `<base>/<blind>/interlock` | to bridge | `ON` while the window or door is open (the blind won't close, and stops if closing), `OFF` when shut. Send it retained |
 | `<base>/wind` | to bridge | `ON`: every *Awning* retracts and stays until `OFF`. Send it retained |
 | `<base>/scene/set` | to bridge | a scene's id or name |
 | `<base>/channels/set` | to bridge | `1,3:OPEN`, `2-5:CLOSE` or `4:STOP`: any channels in one radio frame |
 | `<base>/<blind>/lock` | from bridge | `ON` or `OFF` |
-| `<base>/<blind>/available` | from bridge | `online` when the radio works and the remote is learned |
+| `<base>/<blind>/available` | from bridge | `online` when the radio works and the remote is learned (or the blind is a Somfy motor) |
+| `<base>/<blind>/tilt` | from bridge | `0` to `100`, once the tilt is known. Only for blinds with a *Tilt time* |
 | `<base>/<blind>/state` | from bridge | `open`, `closed`, `opening`, `closing` or `stopped` |
-| `<base>/<blind>/position` | from bridge | `0`–`100` |
+| `<base>/<blind>/position` | from bridge | `0` to `100` |
 | `<base>/<blind>/attributes` | from bridge | JSON |
-| `<base>/remote/event` | from bridge | `{"event_type":"open","channels":"1"}` |
+| `<base>/remote/event` | from bridge | `{"event_type":"open","channels":"1"}`. A long press: `{"event_type":"open_long","seconds":2.1}`. A Somfy remote: `{"event_type":"close","somfy_remote":"0F12AB","somfy_command":"down"}` |
+| `<base>/diag/rssi` | from bridge | Wi-Fi signal in dBm |
+| `<base>/diag/uptime` | from bridge | seconds since the bridge started |
+| `<base>/diag/ip` | from bridge | the bridge's IP address |
+| `<base>/diag/radio` | from bridge | `ON` when the CC1101 is working, `OFF` if not |
+| `<base>/diag/last_remote` | from bridge | the last button heard, for example `open · channel 1` |
+| `<base>/diag/radio_rssi` | from bridge | signal strength of the last frame from your remotes, in dBm |
 | `<base>/status` | from bridge | `online` or `offline` (last will) |
 
 ## Positions
