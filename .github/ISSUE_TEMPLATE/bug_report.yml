@@ -1,0 +1,50 @@
+name: Bug report
+description: Something on the bridge or the ESPHome component doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please don't paste passwords, Wi-Fi names or MQTT logins.
+  - type: input
+    id: version
+    attributes:
+      label: Firmware version
+      description: Settings, Firmware, Version. For ESPHome, the ESPHome version.
+      placeholder: "1.8.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: build
+    attributes:
+      label: Build
+      options:
+        - ESP32 (Wi-Fi)
+        - WT32-ETH01 (Ethernet)
+        - ESP32-S3
+        - ESPHome aok_rf component
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Motors and remote
+      description: Brand of the blinds, the remote model (for example AC127-06L), and whether any are Somfy RTS.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The Logs tab (Download), or the serial log at 115200 baud. For remote problems, the frames from the Activity tab help too.
+      render: text
+  - type: textarea
+    id: ha
+    attributes:
+      label: Home Assistant
+      description: Home Assistant version and any MQTT errors from its log, if the problem is in Home Assistant.

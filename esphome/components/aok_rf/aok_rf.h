@@ -50,6 +50,7 @@ class AokRf : public Component {
   // With pressed_p_already, only the Up is sent (press P twice on the hand remote first).
   void pair(uint16_t mask, bool pressed_p_already);
   // Measure 433.42-434.42 MHz while a remote button is held; logs where it's strongest.
+  // Runs in the background for about 4 s.
   void frequency_scan();
 
   void add_on_long_press_callback(std::function<void(std::string, uint16_t, float)> &&cb) { long_callbacks_.add(std::move(cb)); }
@@ -62,6 +63,8 @@ class AokRf : public Component {
   void on_payload_(uint64_t payload);
   bool transmit_(uint64_t payload);
   bool known_(uint32_t prefix, uint8_t id) const;
+  void scan_tune_();
+  void scan_step_loop_();
 
   int sck_{18}, miso_{19}, mosi_{23}, cs_{5}, gdo0_{12}, gdo2_{27};
   float mhz_{433.92f};
@@ -92,6 +95,11 @@ class AokRf : public Component {
   uint16_t pair_mask_{0};
   uint8_t pair_stage_{0};
   uint32_t pair_at_ms_{0};
+  // frequency scan steps run from loop(): -1 when idle
+  int scan_step_{-1};
+  int scan_peak_{-200}, scan_best_rssi_{-200};
+  float scan_best_{0};
+  uint32_t scan_at_ms_{0};
 #ifdef USE_SENSOR
   sensor::Sensor *rssi_sensor_{nullptr};
 #endif

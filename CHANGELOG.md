@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.8.0] - 2026-11-24
+
+### Security
+- **The web page needs an admin password before it does anything but setup.** Until one is set, only Wi-Fi setup, setting the password, the status, the settings form and the logs work. Blind control, MQTT settings, backup, restore, firmware upload (`/update`) and the other settings answer *403* with a message saying to set a password.
+- **Upgrading with no password:** Home Assistant and MQTT keep working exactly as before, whatever the web password state is. The page shows a banner with a password form on every tab until you set one, and its other buttons stop working until then. Nothing is lost: blinds, remote, scenes and schedules stay as they were.
+- **DNS rebinding blocked:** the API and the live updates on port 81 only answer requests addressed to the bridge's own IP address, its `.local` name or the setup Wi-Fi address.
+- **Status needs the login once a password is set:** `/api/state` and the WebSocket on port 81 (which carry the Wi-Fi name and IP address) now need the login. The page passes the WebSocket a token it gets from `/api/state`.
+- **Changing or removing the admin password needs the current one.** *Remove password* is under *Settings → Device*.
+- The setup Wi-Fi stays open (no Wi-Fi password) so the browser installer keeps working. Without an admin password it only offers setup. The README explains the risk.
+
+### Fixed
+- **Home Assistant refused the cover discovery.** Covers sent both an `availability` list and `availability_topic`, which Home Assistant treats as mutually exclusive. Covers now send only the list; every other entity sends only `availability_topic`.
+- **The frequency scan no longer freezes the bridge for about 4 seconds.** It runs one step at a time in the background, so the page, MQTT and blind timing keep running. A command sent during the scan stops it with a message. The ESPHome `aok_rf.frequency_scan` works the same way, so ESPHome's loop watchdog isn't hit.
+- **MQTT reconnects block for at most about 2 seconds** instead of up to 3 or more, and still never while a blind is moving.
+- **Faster MQTT commands:** Wi-Fi power saving is turned off once connected. With it on, the radio sleeps between beacons and each incoming command can wait for the next wake-up.
+
+### Added
+- **ESP32-S3 build** (`…-s3-factory.bin` and `…-s3-ota.bin`), built in CI and by `tools/package.sh`.
+- The status shows the largest free memory block next to free memory (`heap_max_block`), which shows memory fragmentation.
+- README sections on security, reset and removal (factory reset, removing the bridge from Home Assistant and clearing its retained MQTT messages), and troubleshooting (serial log, safe mode, MQTT login).
+- A bug report form for GitHub issues.
+
+### Changed
+- ArduinoJson (7.4.3) and PubSubClient (2.8) are pinned to exact versions, and CI pins ESPHome to 2026.11.0. The ESPHome component now says clearly that it needs the Arduino framework.
+- The firmware stays on `espressif32@6.12.0` (Arduino core 2.x). Moving to Arduino core 3 (pioarduino) is planned.
+- The PlatformIO over-the-air target is now `aok-blinds.local` (it was still the old `motolux-blinds.local`).
+- Only pairing to the bridge's own ID is experimental; the README now says so.
+
 ## [1.7.1] - 2026-11-22
 
 ### Fixed
@@ -14,23 +42,20 @@
 - The Activity tab shows Somfy frames (button, remote address and rolling code).
 - `POST /api/somfy` with `pair`, `learn`, `cancel`, `forget_remotes`, `resync` and `send` (raw up/down/my/prog, for testing).
 
-### Notes
-- Rolling codes are written to flash before every send and are part of the backup. Restoring a backup never moves a code backwards. *Resync* skips a code ahead by 20, only needed if a motor stops answering after restoring onto a new board.
-- The ESPHome `aok_rf` component is still A-OK only. For Somfy in ESPHome use the firmware, or ESPSomfy-RTS.
-
-## Unreleased
-
-
 ### ESPHome component
 - `aok_rf` now has the bridge's radio features: `extra_remotes`, `on_long_press`, an `rssi:` sensor, `repeat_remote`, `aok_rf.frequency_scan`, and pairing to the component's own ID (`own_id`, `own_channels`, `aok_rf.pair`, `program:` in `remote:`).
 - New `esphome/full-example.yaml` doing scenes, schedules with sunrise/sunset, named positions, a lock, a window interlock and wind protection in YAML. CI checks and compiles it. The table at the end of `docs/esphome.md` maps each bridge feature to its ESPHome version.
+
+### Notes
+- Rolling codes are written to flash before every send and are part of the backup. Restoring a backup never moves a code backwards. *Resync* skips a code ahead by 20, only needed if a motor stops answering after restoring onto a new board.
+- The ESPHome `aok_rf` component is still A-OK only. For Somfy in ESPHome use the firmware, or ESPSomfy-RTS.
 
 ## [1.6.0] - 2026-11-17
 
 ### Added
 - **Pair motors to the bridge's own ID (experimental):** the bridge learns your remote's P button when you press it, then *Pair automatically* sends P, P and Up from its own remote ID on a channel. That motor then keeps working from Home Assistant even if the hand remote is lost or replaced. Without the P button learned, press P twice on the hand remote and use *Pair now*. Not yet confirmed on every A-OK motor: if the motor doesn't jog at the end, nothing has changed.
 - **Repeater:** *Repeat the hand remote* sends each press again from the bridge, for a motor at the edge of the remote's range.
-- **Frequency scan:** hold a remote button and press *Scan*. The bridge measures 433.42–434.42 MHz and offers to tune to where your remote is strongest.
+- **Frequency scan:** hold a remote button and press *Scan*. The bridge measures 433.42 to 434.42 MHz and offers to tune to where your remote is strongest.
 - **Tilt** for venetian blinds: set a *Tilt time* and Home Assistant gets a tilt slider (`<base>/<blind>/tilt/set`, or `TILT:<0-100>`).
 - **Live updates:** the page gets the state pushed over a WebSocket (port 81) several times a second while blinds move, instead of polling. Polling stays as the fallback.
 - **Ethernet build** for the WT32-ETH01 (`…-eth-factory.bin` / `…-eth-ota.bin`). *Check for updates* picks the right build.

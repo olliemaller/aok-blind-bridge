@@ -4,7 +4,7 @@ These are notes on the 64-bit A-OK remote format, as used by the AC127 remotes t
 
 ## Radio
 
-- 433.92 MHz, on-off keying (OOK).
+- 433.92 MHz, on-off keying (OOK): the transmitter is simply switched on and off, and the lengths of the on and off pulses carry the bits.
 - Pulse-width coded, starting high. The CC1101 runs in asynchronous serial mode: GDO0 is the transmit data input, and GDO2 outputs the received data.
 
 ## One frame
@@ -21,7 +21,7 @@ These are notes on the 64-bit A-OK remote format, as used by the AC127 remotes t
 | `0` | long, 582 µs | short, 263 µs |
 | `1` | short, 263 µs | long, 582 µs |
 
-The remote sends each press about 8 times. The bridge does the same. The decoder accepts 140–420 µs as short, 421–950 µs as long and 3.8–6.5 ms as the sync high, which covers the drift between remotes and the jitter of an ESP32 interrupt.
+The remote sends each press about 8 times. The bridge does the same. The decoder accepts 140 to 420 µs as short, 421 to 950 µs as long and 3.8 to 6.5 ms as the sync high, which covers the drift between remotes and the jitter of an ESP32 interrupt.
 
 ## The 64 bits
 
@@ -34,7 +34,7 @@ The remote sends each press about 8 times. The bridge does the same. The decoder
 
 - **Prefix (24 bits)**: fixed for a remote.
 - **Remote ID (8 bits)**: fixed for a remote. The prefix and ID together are what the motor was paired with.
-- **Channel field (16 bits)**: which channels the press is for. It starts as `0xFFFF`. For each channel *n* (1–16), bit `(n + 7) mod 16` is cleared:
+- **Channel field (16 bits)**: which channels the press is for. It starts as `0xFFFF`. For each channel *n* (1 to 16), bit `(n + 7) mod 16` is cleared:
 
   | Channel | 1 | 2 | … | 8 | 9 | … | 16 |
   |---|---|---|---|---|---|---|---|

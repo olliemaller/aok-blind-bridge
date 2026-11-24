@@ -14,12 +14,13 @@ Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an 
 
 - **Learns your remote.** Press Up, Down and Stop once. The bridge copies the remote, so the motors accept it like a second remote. Nothing on the motors changes, and nothing needs re-pairing.
 - **Follows the hand remote.** When someone uses the remote on the wall, the bridge hears it, and the positions in Home Assistant move to match.
-- **Positions, not just up and down.** Each blind gets a 0–100 % slider. The bridge times the travel and sends Stop at the right moment. Opening and closing have separate travel times.
-- **Groups and all-blinds.** A blind on several channels moves them together in one radio frame. One button moves every blind.
+- **Positions, not just up and down.** Each blind gets a 0 to 100 % slider. The bridge times the travel and sends Stop at the right moment. Opening and closing have separate travel times.
+- **Groups and all-blinds.** A blind on several channels moves them together in one radio frame (a frame is one short coded message, like a single press of a remote button). One button moves every blind.
 - **Scenes and schedules on the bridge.** Scenes move several blinds to set positions. Schedules run at a time, at sunrise or at sunset (with an offset), on chosen days, even when Home Assistant is down.
 - **Named positions, locks, windows and wind.** Up to four named positions per blind. Lock a blind so automations leave it alone. A window sensor can stop a blind closing, and a wind sensor retracts awnings.
 - **Safe moves.** Reversing a moving blind stops it first. A blind in an unknown position goes to the nearer end first, then to the %. A start-up delay per blind makes short moves accurate.
-- **Experimental: pairs motors to its own remote ID**, so a lost hand remote doesn't matter. Also a repeater for far motors, a frequency scan, tilt for venetian blinds, live page updates, and an Ethernet build for the WT32-ETH01.
+- **Pairs motors to its own remote ID (experimental)**, so a lost hand remote doesn't matter. This is the only experimental feature.
+- **Also:** a repeater for far motors, a frequency scan, tilt for venetian blinds, live page updates, an Ethernet build for the WT32-ETH01 and a build for ESP32-S3 boards.
 - **Follows more than one remote**, reports long presses, and shows the signal strength of each frame. After three crashes in a row it starts in safe mode, so the page and updates still work.
 - **Shows up in Home Assistant on its own** through MQTT discovery. You get a cover per blind, put in the room you set, plus a remote-button event entity for automations.
 - **Runs from its own web page:**
@@ -38,9 +39,9 @@ Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an 
 
 | Part | Notes |
 |---|---|
-| ESP32 dev board | Classic ESP32, such as the HW-395 / ESP32-WROOM-32 DevKit (38 pins). |
+| ESP32 dev board | Classic ESP32, such as the HW-395 / ESP32-WROOM-32 DevKit (38 pins). ESP32-S3 boards (ESP32-S3-DevKitC-1) work with the `-s3-` build, wired SCK 12, MISO 13, MOSI 11, CSN 10, GDO0 14, GDO2 9. |
 | CC1101 module, 433 MHz | The common blue 8-pin board ("CC1101 433M V2.0") with its spring or wire antenna. |
-| 8 jumper wires | Female–female. |
+| 8 jumper wires | Female-female. |
 
 Power the CC1101 from **3V3, never 5V**.
 
@@ -66,17 +67,49 @@ To flash by hand, download `aok-blind-bridge-<version>-factory.bin` from [Releas
 
 ## Set up
 
-1. Open `http://aok-blinds.local`, or the IP address your router gave it.
+1. Open `http://aok-blinds.local`, or the IP address your router gave it. Set an admin password when the page asks: until you do, the page only does Wi-Fi setup (see [Security](#security)).
 2. **Remote**: press *Start learning*, then press **Up**, **Down** and **Stop** on any channel of your remote.
 3. **Set up blinds**: add a blind for each remote channel. The page offers to add the channels your remote has used. Give each blind a room.
 4. **Calibrate**: time each blind closing and opening.
-5. **Settings → Home Assistant**: enter your MQTT broker. If you don't have one, install the Mosquitto add-on. The blinds then appear under *Settings → Devices & services → MQTT*.
+5. **Settings → Home Assistant**: enter your MQTT broker. The broker is the small message server that Home Assistant and the bridge both connect to, so they can pass commands and positions to each other. If you don't have one, install the Mosquitto add-on. The blinds then appear under *Settings → Devices & services → MQTT*.
 
 More detail is in [docs/setup.md](docs/setup.md). Entities and MQTT topics are in [docs/home-assistant.md](docs/home-assistant.md).
 
 ## Updating
 
 Go to *Settings → Firmware → Check for updates*. The page downloads the new version from GitHub and installs it. The bridge itself never needs internet access. You can also upload the `…-ota.bin` from a release. Your blinds, remote and settings are kept.
+
+## Security
+
+- **Admin password.** From 1.8.0 the web page only does Wi-Fi setup until you set an admin password (user name `admin`). Until then, blind control, MQTT settings, backup, restore and firmware upload answer *403* with a message saying to set a password. The setup Wi-Fi works as before.
+- **Upgrading from 1.7.x with no password.** Nothing changes for Home Assistant: MQTT discovery, commands, scenes and schedules keep working whatever the web password state is. The page shows a banner with a password form on every tab, and its other buttons stop working until you fill it in. Once set, the browser asks for the login.
+- **Changing or removing the password** is under *Settings → Device*, and needs the current password. Removing it puts the page back to setup only.
+- **Forgotten password:** see [Reset and removal](#reset-and-removal). Backups never include passwords.
+- **Other sites can't use the bridge.** It only answers API requests addressed to its own IP address or `.local` name, which blocks DNS rebinding (a trick where a web site points its own name at your bridge). With a password set, the status and the live updates on port 81 need the login too.
+- **The setup Wi-Fi is open** (no Wi-Fi password), because people flash from the browser and have no way to read a printed code. It appears on first start, and again if the bridge can't join your Wi-Fi for 45 s. While it's up, anyone in range can join it and open the page. Without an admin password they can only change the Wi-Fi settings, which could take the bridge off your network. With a password set they can't change anything. Set a password, and keep the bridge within range of your Wi-Fi.
+
+## Reset and removal
+
+- **Factory reset:** erase the flash and install again. In the [web installer](https://blinds.maller.com.au/) choose *Erase device* when it asks, or run `esptool.py erase_flash` and then flash the factory file. This clears the Wi-Fi, admin password, remote codes and blinds. *Restore from file* puts back a backup.
+- **Remove from Home Assistant:**
+  1. Unplug the bridge first, or it publishes everything again when it reconnects.
+  2. Clear the retained discovery and state messages from the broker. With the Mosquitto clients installed (base topic `aok_blinds`, discovery prefix `homeassistant`):
+     ```bash
+     mosquitto_sub -h homeassistant.local -u USER -P PASS -t 'homeassistant/+/+/config' -t 'aok_blinds/#' \
+       --retained-only -W 3 -F '%t' | grep -E '^homeassistant/.*/aok_blinds|^aok_blinds/' |
+       while read -r t; do mosquitto_pub -h homeassistant.local -u USER -P PASS -t "$t" -r -n; done
+     ```
+     MQTT Explorer can do the same by hand: delete each retained topic under `homeassistant/` that has `aok_blinds` in it, and everything under `aok_blinds/`.
+  3. In Home Assistant, open *Settings → Devices & services → MQTT*, and delete the bridge and its blinds if any are left.
+
+## Troubleshooting
+
+- **Serial log.** Connect the ESP32 by USB and open a serial monitor at 115200 baud (`pio device monitor`, or *Logs & console* in the web installer). The bridge prints what it's doing from the moment it starts, including Wi-Fi and MQTT errors. The *Logs* tab shows the last 120 events once it's on the network.
+- **Safe mode.** After three crashes in a row the bridge starts without the radio and MQTT, so its page, logs and updates still work. Check the logs, fix the setting or update the firmware, then restart it from the page. It starts normally after that restart.
+- **MQTT login.** If the Home Assistant card says the username or password is wrong, the broker refused the login. For the Mosquitto add-on, use a Home Assistant user (or one in the add-on's *Logins*), not `homeassistant` or `addons`, which are reserved. *Test connection* tries the settings before you save them.
+- **"Refused: open the bridge by its IP address or its .local name".** From 1.8.0 the bridge only answers its IP address, `aok-blinds.local` (or the device name you set) and the setup Wi-Fi address. A name from your router, such as `aok-blinds.lan`, is refused. Use the IP address or the `.local` name.
+- **"Set an admin password first".** You're on 1.8.0 or later with no admin password. Set one in the banner at the top of the page.
+- **Home Assistant says the cover's configuration is invalid** (before 1.8.0): update the firmware. Older versions sent two availability settings that Home Assistant now refuses.
 
 ## How the protocol works
 
@@ -94,9 +127,11 @@ Go to *Settings → Firmware → Check for updates*. The page downloads the new 
 
 ## Development
 
+The firmware is built on the Arduino core 2.x (`espressif32@6.12.0`). Moving to Arduino core 3 (pioarduino) is planned; until then the platform stays pinned.
+
 ```bash
 pio run -e hw395                       # build (ui/index.html is gzipped into the firmware automatically)
-tools/package.sh . dist                # factory + OTA images
+tools/package.sh . dist                # factory + OTA images for ESP32, WT32-ETH01 and ESP32-S3
 g++ -std=c++17 -I include test/test_protocol.cpp -o /tmp/t && /tmp/t   # protocol round-trip tests
 python3 tools/mock_bridge.py           # fake bridge API at http://localhost:8099 for working on the page
 ```
