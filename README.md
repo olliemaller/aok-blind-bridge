@@ -19,10 +19,11 @@ Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an 
 - **Scenes and schedules on the bridge.** Scenes move several blinds to set positions. Schedules run at a time, at sunrise or at sunset (with an offset), on chosen days, even when Home Assistant is down.
 - **Named positions, locks, windows and wind.** Up to four named positions per blind. Lock a blind so automations leave it alone. A window sensor can stop a blind closing, and a wind sensor retracts awnings.
 - **Safe moves.** Reversing a moving blind stops it first. A blind in an unknown position goes to the nearer end first, then to the %. A start-up delay per blind makes short moves accurate.
+- **Drift correction.** After 10 moves that stop part way (you can change the number, or set 0 to turn it off), the next move to fully open or closed waits the whole run time, so the end counts and the position is right again. With *Re-sync through an end stop* on, a part-way move goes to the nearer end first, then on to the position. That one is off by default, because you see the blind take the long way. Both are under *Settings → Device*.
 - **Pairs motors to its own remote ID (experimental)**, so a lost hand remote doesn't matter. This is the only experimental feature.
 - **Also:** a repeater for far motors, a frequency scan, tilt for venetian blinds, live page updates, an Ethernet build for the WT32-ETH01 and a build for ESP32-S3 boards.
 - **Follows more than one remote**, reports long presses, and shows the signal strength of each frame. After three crashes in a row it starts in safe mode, so the page and updates still work.
-- **Shows up in Home Assistant on its own** through MQTT discovery. You get a cover per blind, put in the room you set, plus a remote-button event entity for automations.
+- **Shows up in Home Assistant on its own** through MQTT discovery. You get a cover per blind, put in the room you set, plus a remote-button event entity for automations. For one "All blinds" entity in Home Assistant, add a cover group: *Settings → Devices & services → Helpers → Create helper → Group → Cover group*, and pick the blinds.
 - **Runs from its own web page:**
   - setup Wi-Fi portal
   - remote learning
@@ -86,6 +87,7 @@ Go to *Settings → Firmware → Check for updates*. The page downloads the new 
 - **Changing or removing the password** is under *Settings → Device*, and needs the current password. Removing it puts the page back to setup only.
 - **Forgotten password:** see [Reset and removal](#reset-and-removal). Backups never include passwords.
 - **Other sites can't use the bridge.** It only answers API requests addressed to its own IP address or `.local` name, which blocks DNS rebinding (a trick where a web site points its own name at your bridge). With a password set, the status and the live updates on port 81 need the login too.
+- **Names from your router.** To open the page as `aok-blinds.lan` or another name your router or local DNS gives the bridge, add it under *Settings → Device → Other names* (up to 4, separated by commas; from 1.9.0). Only the admin can change the list. Add only names your own network answers: each one is a name the bridge trusts.
 - **The setup Wi-Fi is open** (no Wi-Fi password), because people flash from the browser and have no way to read a printed code. It appears on first start, and again if the bridge can't join your Wi-Fi for 45 s. While it's up, anyone in range can join it and open the page. Without an admin password they can only change the Wi-Fi settings, which could take the bridge off your network. With a password set they can't change anything. Set a password, and keep the bridge within range of your Wi-Fi.
 
 ## Reset and removal
@@ -107,7 +109,7 @@ Go to *Settings → Firmware → Check for updates*. The page downloads the new 
 - **Serial log.** Connect the ESP32 by USB and open a serial monitor at 115200 baud (`pio device monitor`, or *Logs & console* in the web installer). The bridge prints what it's doing from the moment it starts, including Wi-Fi and MQTT errors. The *Logs* tab shows the last 120 events once it's on the network.
 - **Safe mode.** After three crashes in a row the bridge starts without the radio and MQTT, so its page, logs and updates still work. Check the logs, fix the setting or update the firmware, then restart it from the page. It starts normally after that restart.
 - **MQTT login.** If the Home Assistant card says the username or password is wrong, the broker refused the login. For the Mosquitto add-on, use a Home Assistant user (or one in the add-on's *Logins*), not `homeassistant` or `addons`, which are reserved. *Test connection* tries the settings before you save them.
-- **"Refused: open the bridge by its IP address or its .local name".** From 1.8.0 the bridge only answers its IP address, `aok-blinds.local` (or the device name you set) and the setup Wi-Fi address. A name from your router, such as `aok-blinds.lan`, is refused. Use the IP address or the `.local` name.
+- **"Refused: open the bridge by its IP address or its .local name".** From 1.8.0 the bridge only answers its IP address, `aok-blinds.local` (or the device name you set) and the setup Wi-Fi address. A name from your router, such as `aok-blinds.lan`, is refused. Use the IP address or the `.local` name, or from 1.9.0 add the name under *Settings → Device → Other names*.
 - **"Set an admin password first".** You're on 1.8.0 or later with no admin password. Set one in the banner at the top of the page.
 - **Home Assistant says the cover's configuration is invalid** (before 1.8.0): update the firmware. Older versions sent two availability settings that Home Assistant now refuses.
 
@@ -133,6 +135,7 @@ The firmware is built on the Arduino core 2.x (`espressif32@6.12.0`). Moving to 
 pio run -e hw395                       # build (ui/index.html is gzipped into the firmware automatically)
 tools/package.sh . dist                # factory + OTA images for ESP32, WT32-ETH01 and ESP32-S3
 g++ -std=c++17 -I include test/test_protocol.cpp -o /tmp/t && /tmp/t   # protocol round-trip tests
+g++ -std=c++17 -I include test/test_logic.cpp -o /tmp/l && /tmp/l      # drift correction and host name checks (test_sun, test_somfy the same way)
 python3 tools/mock_bridge.py           # fake bridge API at http://localhost:8099 for working on the page
 ```
 
@@ -140,6 +143,7 @@ python3 tools/mock_bridge.py           # fake bridge API at http://localhost:809
 |---|---|
 | `src/main.cpp` | Firmware: radio, position model, MQTT, web API, Improv |
 | `include/aok_protocol.h` | Protocol encode/decode, header-only and host-testable |
+| `include/aok_drift.h`, `include/aok_hosts.h` | Drift-correction decisions and the extra host name checks, host-tested by `test/test_logic.cpp` |
 | `ui/index.html` | The web dashboard |
 | `esphome/` | ESPHome component and example |
 | `site/` | Web installer (deployed to GitHub Pages by the release workflow) |

@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.9.0] - 2026-11-24
+
+### Added
+- **Other names for the page.** *Settings → Device → Other names* takes up to 4 extra names (comma-separated), such as a router's `aok-blinds.lan`, that the DNS-rebinding check lets in. Each is checked as a DNS name. Only the admin can change the list. It is saved with the network settings and in backups.
+- **Drift correction.** The bridge counts, per blind, the moves that stopped part way since the blind last reached an end stop. After *Re-sync after* of them (10 by default, 0 turns it off), the next move to fully open or closed waits the whole run time before it counts the blind as there. With *Re-sync through an end stop* on (off by default), a move to a middle position goes to the nearer end first and then on. The count is saved with the positions, so it adds no flash writes, and shows as `partial_moves` in the cover's attributes.
+- Host test `test/test_logic.cpp` for the drift decisions and the host name checks, run in CI.
+
+### Changed
+- **Home Assistant device discovery.** One message per blind on `<prefix>/device/<base>_<blind>/config` and one for the bridge on `<prefix>/device/<base>/config`, with the entities under `cmps`. Each blind is still its own device. The unique IDs haven't changed. The first connection after upgrading sends `{"migrate_discovery":true}` to the old per-entity topics, then the device messages, then clears the old topics, so entities keep their history and aren't created twice. Needs Home Assistant 2025.1 or later.
+- The MQTT buffer is 6 kB, to fit a device message.
+
+### Fixed
+- Saving scenes now updates Home Assistant straight away. Before, the new scenes only appeared after the next MQTT reconnect.
+
+### Not added
+- An "All blinds" entity: Home Assistant's cover group helper does this. The README and `docs/home-assistant.md` show how.
+- Sun-based schedules: these were already there (sunrise or sunset with an offset of up to 4 hours).
+
 ## [1.8.0] - 2026-11-24
 
 ### Security

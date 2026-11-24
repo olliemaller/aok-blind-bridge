@@ -9,7 +9,7 @@ T0 = time.time()
 names = ["Lounge left", "Lounge right", "Kitchen", "Study", "Bedroom", "Dining"]
 rooms = ["Lounge", "Lounge", "Kitchen", "Study", "Bedroom", ""]
 REV = [1]
-NET = dict(brand="A-OK", tz="", tz_name="")
+NET = dict(brand="A-OK", tz="", tz_name="", extra_hosts="", resync_after=10, resync_through=False)
 blinds = [dict(id=n.lower().replace(" ", "_"), name=n, channels=str(i + 1), open_ms=24000 + i * 900, close_ms=22000 + i * 700,
                invert=False, favourite=(40 if i == 0 else -1), device_class="shade", room=rooms[i]) for i, n in enumerate(names)]
 blinds.append(dict(id="lounge", name="Lounge (both)", channels="1,2", open_ms=24000, close_ms=22000, invert=False, favourite=-1, device_class="shade", room="Lounge"))
@@ -111,7 +111,7 @@ class H(BaseHTTPRequestHandler):
             ok = body.get("user") == "mqtt"
             return self.send(200, dict(ok=True, connected=ok, state=0 if ok else 5, message="Connected. These settings work." if ok else "The broker rejected the username or password."))
         if p == "/api/network":
-            for k in ("brand", "tz", "tz_name"):
+            for k in ("brand", "tz", "tz_name", "extra_hosts", "resync_after", "resync_through"):
                 if k in body: NET[k] = body[k]
             log("I", "Network settings saved"); return self.send(200, {"ok": True, "rebooting": False})
         if p == "/api/command" and body["id"] == "all":

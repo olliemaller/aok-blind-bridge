@@ -21,7 +21,7 @@ jobs:
       - name: ESPHome copy of the protocol header is in sync
         run: cmp include/aok_protocol.h esphome/components/aok_rf/aok_protocol.h
       - name: Protocol tests
-        run: g++ -std=c++17 -Wall -Wextra -I include test/test_protocol.cpp -o /tmp/aok_test && /tmp/aok_test | tail -1 && g++ -std=c++17 -Wall -Wextra -I include test/test_sun.cpp -o /tmp/aok_sun && /tmp/aok_sun && g++ -std=c++17 -Wall -Wextra -I include test/test_somfy.cpp -o /tmp/somfy_test && /tmp/somfy_test
+        run: g++ -std=c++17 -Wall -Wextra -I include test/test_protocol.cpp -o /tmp/aok_test && /tmp/aok_test | tail -1 && g++ -std=c++17 -Wall -Wextra -I include test/test_sun.cpp -o /tmp/aok_sun && /tmp/aok_sun && g++ -std=c++17 -Wall -Wextra -I include test/test_somfy.cpp -o /tmp/somfy_test && /tmp/somfy_test && g++ -std=c++17 -Wall -Wextra -I include test/test_logic.cpp -o /tmp/aok_logic && /tmp/aok_logic
       - name: Build firmware
         run: tools/package.sh . dist
       - uses: actions/upload-artifact@v4
