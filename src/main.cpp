@@ -18,6 +18,8 @@
 #include <Update.h>
 #include <math.h>
 #include "aok_sun.h"
+#include "aok_drift.h"
+#include "aok_hosts.h"
 #include <WebSocketsServer.h>
 #ifdef USE_ETH
 #include <ETH.h>
@@ -25,13 +27,14 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <time.h>
+#include <vector>
 #include <stdarg.h>
 
 #include "aok_protocol.h"
 #include "somfy_rts.h"
 #include "web_ui_gz.h"
 
-#define FW_VERSION "1.8.0"
+#define FW_VERSION "1.9.0"
 #define PROJECT_URL "https://github.com/olliemaller/aok-blind-bridge"
 
 // HW-395 / ESP32 DevKit defaults (VSPI). Change in the web UI under Radio if wired differently.
@@ -85,6 +88,9 @@ struct NetCfg {
   String mqttHost;
   uint16_t mqttPort = 1883;
   String mqttUser, mqttPass, base = "aok_blinds", discovery = "homeassistant";
+  String extraHosts;                // other names the page answers to (aok-blinds.lan), comma-separated
+  uint8_t resyncEvery = 10;         // part-way moves before a re-sync at an end stop (0 = off)
+  bool resyncThrough = false;       // a middle target may go via an end stop to re-sync
 };
 
 struct RemoteCfg {
@@ -145,6 +151,7 @@ struct BlindState {
   uint32_t lastPublishMs = 0;
   String lastSource = "none";
   bool dirty = true;
+  uint8_t partials = 0;        // runs that stopped part way since the last end stop (drift correction)
 };
 
 struct HeardFrame {
@@ -362,6 +369,7 @@ void saveNet() {
   d["mh"] = net.mqttHost; d["mp"] = net.mqttPort; d["mu"] = net.mqttUser; d["mw"] = net.mqttPass;
   d["base"] = net.base; d["disc"] = net.discovery;
   d["brand"] = net.brand; d["tz"] = net.tz; d["tzn"] = net.tzName;
+  d["xh"] = net.extraHosts; d["rs"] = net.resyncEvery; d["rst"] = net.resyncThrough;
   String s; serializeJson(d, s); prefs.putString("net", s);
 }
 
@@ -375,6 +383,7 @@ void loadNet() {
   net.discovery = d["disc"] | "homeassistant";
   net.brand = d["brand"] | "";
   net.tz = d["tz"] | ""; net.tzName = d["tzn"] | "";
+  net.extraHosts = d["xh"] | ""; net.resyncEvery = d["rs"] | 10; net.resyncThrough = d["rst"] | false;
   // settings saved by 1.0.x/1.1.x: keep what those versions did
   if (!net.brand.length()) net.brand = net.hostname.indexOf("motolux") >= 0 ? "Motolux" : "A-OK";
   if (upgraded && !d["tz"].is<const char*>()) { net.tz = "AEST-10AEDT,M10.1.0,M4.1.0/3"; net.tzName = "Australia/Melbourne"; }
@@ -630,7 +639,11 @@ void requestPositionSave() { positionsDirty = true; positionsDirtyMs = millis();
 void savePositions() {
   positionsDirty = false;
   JsonDocument d;
-  for (size_t i = 0; i < blindCount; ++i) if (st[i].motion == Motion::Stopped) d[cfg[i].id] = st[i].position;
+  for (size_t i = 0; i < blindCount; ++i) {
+    if (st[i].motion != Motion::Stopped) continue;
+    d[cfg[i].id] = st[i].position;
+    if (st[i].partials) d["#"][cfg[i].id] = st[i].partials;  // "#" can't be a blind id; older firmware ignores it
+  }
   String s; serializeJson(d, s);
   if (s != prefs.getString("pos", "")) prefs.putString("pos", s);
 }
@@ -642,6 +655,7 @@ void loadPositions() {
     int p = d[cfg[i].id] | -1;
     st[i].position = st[i].startPos = st[i].target = p < 0 ? -1 : clampPos(p);
     st[i].lastSource = p < 0 ? "none" : "restored";
+    st[i].partials = d["#"][cfg[i].id] | 0;
   }
 }
 
@@ -848,6 +862,7 @@ aok::Action rfFor(size_t i, Motion m) {
 
 void beginMotion(size_t i, Motion m, int target, bool autoStop, const String& source) {
   BlindState& s = st[i];
+  if (s.motion != Motion::Stopped && s.motion != m) s.partials = aok::afterRun(s.partials, false);  // reversed part way
   int cur = estimate(i);
   if (cur < 0) cur = (m == Motion::Opening) ? 0 : 100;  // unknown: assume the far end so the full run is covered
   s.position = cur;
@@ -862,8 +877,10 @@ void beginMotion(size_t i, Motion m, int target, bool autoStop, const String& so
   s.dirty = true;
 }
 
+// Stopping a run: counts as part way here; a run that reached its end stop resets the count after.
 void haltMotion(size_t i, const String& source) {
   BlindState& s = st[i];
+  if (s.motion != Motion::Stopped) s.partials = aok::afterRun(s.partials, false);
   const int cur = estimate(i);
   s.position = cur;
   s.startPos = cur;
@@ -940,11 +957,28 @@ bool moveTo(size_t i, int target, const String& source, String& err) {
     }
   }
   st[i].pending = -1;
+  // Drift correction: after enough part-way runs, re-sync at an end stop (see aok_drift.h).
+  const aok::Resync plan = aok::resyncPlan(st[i].partials, net.resyncEvery, target, net.resyncThrough);
+  if (plan == aok::Resync::ViaEnd && cur >= 0 && st[i].motion == Motion::Stopped && !st[i].interlock && canStop(i)) {
+    const int end = aok::resyncEnd(cur, target);
+    if (cur != end) {
+      if (!moveTo(i, end, source, err)) return false;
+      st[i].after = target;
+      LOGI("%s: %u part-way moves, re-syncing at %s on the way", cfg[i].name.c_str(), static_cast<unsigned>(st[i].partials), end ? "open" : "closed");
+      return true;
+    }
+  }
   if (cur < 0) cur = target == 100 ? 0 : 100;
   const Motion m = target > cur ? Motion::Opening : Motion::Closing;
   if (target > 0 && target < 100 && !canStop(i)) { err = "learn the Stop button first"; return false; }
   if (!blindSend(i, rfFor(i, m), err)) return false;
   blindApply(i, rfFor(i, m), source, target);
+  if (plan == aok::Resync::AtEnd && !st[i].autoStop) {
+    // The estimate may be off, so give the motor the whole travel time to reach its limit
+    // before the position counts as the end (and before any move that follows).
+    st[i].durMs = travelMs(i, st[i].motion) + cfg[i].startMs + 1500;
+    LOGI("%s: %u part-way moves, re-syncing at the end stop", cfg[i].name.c_str(), static_cast<unsigned>(st[i].partials));
+  }
   return true;
 }
 
@@ -1004,62 +1038,112 @@ String topic(const String& suffix) { return net.base + "/" + suffix; }
 String blindTopic(size_t i, const char* suffix) { return net.base + "/" + cfg[i].id + "/" + suffix; }
 String nodeId() { return net.base; }
 
-void deviceJson(JsonObject o) {
-  JsonObject dev = o["device"].to<JsonObject>();
+// Home Assistant device discovery: one message per blind (each blind is its own device, so it can
+// sit in its own area) and one for the bridge, with the entities under "cmps". The unique_ids are
+// the ones the per-entity messages of 1.8.0 and earlier used, so entities keep their names and history.
+JsonObject deviceDoc(JsonDocument& d) {
+  JsonObject dev = d["dev"].to<JsonObject>();
   dev["identifiers"].to<JsonArray>().add(nodeId());
   dev["name"] = net.brand + " Blind Bridge";
   dev["manufacturer"] = "aok-blind-bridge";
   dev["model"] = "ESP32 + CC1101";
   dev["sw_version"] = FW_VERSION;
   if (netUp()) dev["configuration_url"] = String("http://") + netIp().toString();
-  // Home Assistant refuses a payload with both availability keys; covers bring their own list.
-  if (!o["availability"].is<JsonArray>()) o["availability_topic"] = topic("status");
-  JsonObject origin = o["origin"].to<JsonObject>();
+  JsonObject origin = d["o"].to<JsonObject>();
   origin["name"] = "aok-blind-bridge"; origin["sw_version"] = FW_VERSION; origin["support_url"] = PROJECT_URL;
+  return d["cmps"].to<JsonObject>();
 }
 
-void publishJson(const String& t, JsonDocument& d, bool retain = true) {
-  String s; serializeJson(d, s);
-  mqtt.publish(t.c_str(), s.c_str(), retain);
+// One entity. Home Assistant refuses a component with both availability keys; the cover brings its own list.
+JsonObject component(JsonObject cmps, const String& key, const char* platform, bool bridgeAvailability = true) {
+  JsonObject c = cmps[key].to<JsonObject>();
+  c["p"] = platform;
+  if (bridgeAvailability) c["availability_topic"] = topic("status");
+  return c;
 }
+
+// A component with only "p" removes that entity from Home Assistant.
+void removedComponent(JsonObject cmps, const String& key, const char* platform) { cmps[key].to<JsonObject>()["p"] = platform; }
+
+bool publishJson(const String& t, JsonDocument& d, bool retain = true) {
+  String s; serializeJson(d, s);
+  const bool ok = mqtt.publish(t.c_str(), s.c_str(), retain);
+  if (!ok) LOGW("MQTT: couldn't publish %s (%u bytes)", t.c_str(), static_cast<unsigned>(s.length()));
+  return ok;
+}
+
+// The per-entity discovery topics 1.8.0 and earlier published, for moving them to device discovery.
+std::vector<String> legacyDiscoveryTopics() {
+  const String disc = net.discovery, node = nodeId();
+  std::vector<String> t;
+  for (size_t i = 0; i < blindCount; ++i) {
+    const String uid = node + "_" + cfg[i].id;
+    t.push_back(disc + "/cover/" + uid + "/config");
+    if (cfg[i].favourite >= 0) t.push_back(disc + "/button/" + uid + "_favourite/config");
+    t.push_back(disc + "/button/" + uid + "_mark_open/config");
+    t.push_back(disc + "/button/" + uid + "_mark_closed/config");
+    t.push_back(disc + "/switch/" + uid + "_lock/config");
+    for (int k = 0; k < 4; ++k) if (cfg[i].presetPos[k] >= 0) t.push_back(disc + "/button/" + uid + "_preset" + String(k + 1) + "/config");
+  }
+  for (const char* k : {"rssi", "uptime", "ip", "last_remote", "radio_rssi"}) t.push_back(disc + "/sensor/" + node + "_" + k + "/config");
+  t.push_back(disc + "/binary_sensor/" + node + "_radio/config");
+  t.push_back(disc + "/event/" + node + "_remote_event/config");
+  t.push_back(disc + "/button/" + node + "_learn/config");
+  for (size_t k = 0; k < sceneCount; ++k) t.push_back(disc + "/scene/" + node + "_scene_" + scenes[k].id + "/config");
+  return t;
+}
+
+uint32_t migrateAtMs = 0;  // moving from per-entity discovery: when the device messages go out
 
 void publishDiscovery() {
   const String disc = net.discovery;
+  // Once, after upgrading from per-entity discovery: tell Home Assistant to keep the entities
+  // (migrate_discovery), give it a moment to let go of them, publish the device messages, then
+  // clear the old topics. Done in this order nothing is orphaned or created twice.
+  const bool migrating = !prefs.getBool("devdisc", false) && prefs.isKey("pubids");
+  if (migrating) {
+    if (!migrateAtMs) {
+      for (const String& t : legacyDiscoveryTopics()) mqtt.publish(t.c_str(), "{\"migrate_discovery\":true}", true);
+      LOGI("Home Assistant: moving to device discovery");
+      migrateAtMs = millis() + 3000;
+      return;  // discoveryPending stays set; loop() comes back
+    }
+    if (static_cast<int32_t>(millis() - migrateAtMs) < 0) return;
+  }
   JsonDocument ids;
   for (size_t i = 0; i < blindCount; ++i) {
     const String uid = nodeId() + "_" + cfg[i].id;
+    JsonDocument d;
+    JsonObject cmps = deviceDoc(d);
+    JsonObject dev = d["dev"];
+    dev["identifiers"][0] = uid;
+    dev["name"] = cfg[i].name;
+    dev["via_device"] = nodeId();
+    dev["model"] = cfg[i].somfy ? String("Somfy RTS motor") : net.brand + " motor · channel " + maskText(cfg[i].mask);
+    if (cfg[i].room.length()) dev["suggested_area"] = cfg[i].room;
     {
-      JsonDocument d;
-      d["name"] = nullptr;  // entity takes the device name below
-      d["unique_id"] = uid;
-      d["default_entity_id"] = String("cover.") + cfg[i].id;
-      d["command_topic"] = blindTopic(i, "set");
-      d["set_position_topic"] = blindTopic(i, "set_position");
-      d["position_topic"] = blindTopic(i, "position");
-      d["state_topic"] = blindTopic(i, "state");
-      d["json_attributes_topic"] = blindTopic(i, "attributes");
-      d["payload_open"] = "OPEN"; d["payload_close"] = "CLOSE"; d["payload_stop"] = "STOP";
-      d["position_open"] = 100; d["position_closed"] = 0;
-      d["optimistic"] = false;
-      d["device_class"] = cfg[i].deviceClass;
-      JsonArray av = d["availability"].to<JsonArray>();
+      JsonObject c = component(cmps, "cover", "cover", false);
+      c["name"] = nullptr;  // entity takes the device name
+      c["unique_id"] = uid;
+      c["default_entity_id"] = String("cover.") + cfg[i].id;
+      c["command_topic"] = blindTopic(i, "set");
+      c["set_position_topic"] = blindTopic(i, "set_position");
+      c["position_topic"] = blindTopic(i, "position");
+      c["state_topic"] = blindTopic(i, "state");
+      c["json_attributes_topic"] = blindTopic(i, "attributes");
+      c["payload_open"] = "OPEN"; c["payload_close"] = "CLOSE"; c["payload_stop"] = "STOP";
+      c["position_open"] = 100; c["position_closed"] = 0;
+      c["optimistic"] = false;
+      c["device_class"] = cfg[i].deviceClass;
+      JsonArray av = c["availability"].to<JsonArray>();
       av.add<JsonObject>()["topic"] = topic("status");
       av.add<JsonObject>()["topic"] = blindTopic(i, "available");
-      d["availability_mode"] = "all";
+      c["availability_mode"] = "all";
       if (cfg[i].tiltMs) {
-        d["tilt_command_topic"] = blindTopic(i, "tilt/set");
-        d["tilt_status_topic"] = blindTopic(i, "tilt");
-        d["tilt_min"] = 0; d["tilt_max"] = 100;
+        c["tilt_command_topic"] = blindTopic(i, "tilt/set");
+        c["tilt_status_topic"] = blindTopic(i, "tilt");
+        c["tilt_min"] = 0; c["tilt_max"] = 100;
       }
-      deviceJson(d.as<JsonObject>());
-      // each blind is its own device so it can sit in its own area
-      JsonObject dev = d["device"];
-      dev["identifiers"][0] = uid;
-      dev["name"] = cfg[i].name;
-      dev["via_device"] = nodeId();
-      dev["model"] = cfg[i].somfy ? String("Somfy RTS motor") : net.brand + " motor · channel " + maskText(cfg[i].mask);
-      if (cfg[i].room.length()) dev["suggested_area"] = cfg[i].room;
-      publishJson(disc + "/cover/" + uid + "/config", d);
     }
     struct Btn { const char* key; const char* name; const char* payload; const char* icon; };
     const Btn btns[] = {
@@ -1068,70 +1152,37 @@ void publishDiscovery() {
       {"mark_closed", "Mark as closed", "SYNC_CLOSE", "mdi:arrow-collapse-down"},
     };
     for (const Btn& b : btns) {
-      const String buid = uid + "_" + b.key;
-      const String t = disc + "/button/" + buid + "/config";
-      if (strcmp(b.key, "favourite") == 0 && cfg[i].favourite < 0) { mqtt.publish(t.c_str(), "", true); continue; }
-      JsonDocument d;
-      d["name"] = b.name; d["unique_id"] = buid; d["command_topic"] = blindTopic(i, "set");
-      d["payload_press"] = b.payload; d["icon"] = b.icon;
-      if (strcmp(b.key, "favourite") != 0) d["entity_category"] = "config";
-      deviceJson(d.as<JsonObject>());
-      JsonObject dev = d["device"];
-      dev["identifiers"][0] = uid; dev["name"] = cfg[i].name; dev["via_device"] = nodeId();
-      publishJson(t, d);
+      if (strcmp(b.key, "favourite") == 0 && cfg[i].favourite < 0) { removedComponent(cmps, b.key, "button"); continue; }
+      JsonObject c = component(cmps, b.key, "button");
+      c["name"] = b.name; c["unique_id"] = uid + "_" + b.key; c["command_topic"] = blindTopic(i, "set");
+      c["payload_press"] = b.payload; c["icon"] = b.icon;
+      if (strcmp(b.key, "favourite") != 0) c["entity_category"] = "config";
     }
     {  // lock switch: Home Assistant, scenes and schedules leave a locked blind alone
-      JsonDocument d;
-      const String luid = uid + "_lock";
-      d["name"] = "Lock"; d["unique_id"] = luid; d["icon"] = "mdi:lock";
-      d["command_topic"] = blindTopic(i, "lock/set"); d["state_topic"] = blindTopic(i, "lock");
-      d["payload_on"] = "ON"; d["payload_off"] = "OFF"; d["entity_category"] = "config";
-      deviceJson(d.as<JsonObject>());
-      JsonObject dev = d["device"];
-      dev["identifiers"][0] = uid; dev["name"] = cfg[i].name; dev["via_device"] = nodeId();
-      publishJson(disc + "/switch/" + luid + "/config", d);
+      JsonObject c = component(cmps, "lock", "switch");
+      c["name"] = "Lock"; c["unique_id"] = uid + "_lock"; c["icon"] = "mdi:lock";
+      c["command_topic"] = blindTopic(i, "lock/set"); c["state_topic"] = blindTopic(i, "lock");
+      c["payload_on"] = "ON"; c["payload_off"] = "OFF"; c["entity_category"] = "config";
     }
     for (int k = 0; k < 4; ++k) {  // one button per named position
-      const String puid = uid + "_preset" + String(k + 1);
-      const String t = disc + "/button/" + puid + "/config";
-      if (cfg[i].presetPos[k] < 0) { mqtt.publish(t.c_str(), "", true); continue; }
-      JsonDocument d;
-      d["name"] = cfg[i].presetName[k]; d["unique_id"] = puid; d["icon"] = "mdi:blinds-horizontal";
-      d["command_topic"] = blindTopic(i, "set"); d["payload_press"] = String("PRESET:") + String(k + 1);
-      deviceJson(d.as<JsonObject>());
-      JsonObject dev = d["device"];
-      dev["identifiers"][0] = uid; dev["name"] = cfg[i].name; dev["via_device"] = nodeId();
-      publishJson(t, d);
+      const String key = String("preset") + String(k + 1);
+      if (cfg[i].presetPos[k] < 0) { removedComponent(cmps, key, "button"); continue; }
+      JsonObject c = component(cmps, key, "button");
+      c["name"] = cfg[i].presetName[k]; c["unique_id"] = uid + "_" + key; c["icon"] = "mdi:blinds-horizontal";
+      c["command_topic"] = blindTopic(i, "set"); c["payload_press"] = String("PRESET:") + String(k + 1);
     }
+    publishJson(disc + "/device/" + uid + "/config", d);
     ids.add(cfg[i].id);
   }
-  // scenes: one Home Assistant scene each
-  JsonDocument sceneIds;
-  for (size_t k = 0; k < sceneCount; ++k) {
-    JsonDocument d;
-    const String suid = nodeId() + "_scene_" + scenes[k].id;
-    d["name"] = scenes[k].name; d["unique_id"] = suid; d["icon"] = "mdi:blinds";
-    d["command_topic"] = topic("scene/set"); d["payload_on"] = scenes[k].id;
-    deviceJson(d.as<JsonObject>());
-    publishJson(disc + "/scene/" + suid + "/config", d);
-    sceneIds.add(scenes[k].id);
-  }
-  JsonDocument oldScenes;
-  if (!deserializeJson(oldScenes, prefs.getString("pubscenes", "[]"))) {
-    for (JsonVariantConst v : oldScenes.as<JsonArrayConst>()) {
-      bool still = false;
-      for (size_t k = 0; k < sceneCount; ++k) still |= scenes[k].id == v.as<String>();
-      if (!still) mqtt.publish((disc + "/scene/" + nodeId() + "_scene_" + v.as<String>() + "/config").c_str(), "", true);
-    }
-  }
-  { String ss; serializeJson(sceneIds, ss); prefs.putString("pubscenes", ss); }
-  // remove entities for blinds that were deleted
+  // remove blinds that were deleted: an empty device message removes the device and its entities
   JsonDocument old;
   if (!deserializeJson(old, prefs.getString("pubids", "[]"))) {
     for (JsonVariantConst v : old.as<JsonArrayConst>()) {
       const String id = v.as<String>();
       if (findBlind(id) >= 0) continue;
       const String uid = nodeId() + "_" + id;
+      mqtt.publish((disc + "/device/" + uid + "/config").c_str(), "", true);
+      // and the per-entity topics, in case the blind went before the move to device discovery
       mqtt.publish((disc + "/cover/" + uid + "/config").c_str(), "", true);
       for (const char* k : {"favourite", "mark_open", "mark_closed", "preset1", "preset2", "preset3", "preset4"})
         mqtt.publish((disc + "/button/" + uid + "_" + k + "/config").c_str(), "", true);
@@ -1142,16 +1193,16 @@ void publishDiscovery() {
   }
   String s; serializeJson(ids, s); prefs.putString("pubids", s);
 
-  // bridge entities
+  // bridge entities and scenes
+  JsonDocument d;
+  JsonObject cmps = deviceDoc(d);
   auto sensor = [&](const char* key, const char* name, const char* unit, const char* devClass, const char* icon, bool diag) {
-    JsonDocument d;
-    d["name"] = name; d["unique_id"] = nodeId() + "_" + key; d["state_topic"] = topic(String("diag/") + key);
-    if (unit) d["unit_of_measurement"] = unit;
-    if (devClass) d["device_class"] = devClass;
-    if (icon) d["icon"] = icon;
-    if (diag) d["entity_category"] = "diagnostic";
-    deviceJson(d.as<JsonObject>());
-    publishJson(disc + "/sensor/" + nodeId() + "_" + key + "/config", d);
+    JsonObject c = component(cmps, key, "sensor");
+    c["name"] = name; c["unique_id"] = nodeId() + "_" + key; c["state_topic"] = topic(String("diag/") + key);
+    if (unit) c["unit_of_measurement"] = unit;
+    if (devClass) c["device_class"] = devClass;
+    if (icon) c["icon"] = icon;
+    if (diag) c["entity_category"] = "diagnostic";
   };
   sensor("rssi", "Wi-Fi signal", "dBm", "signal_strength", nullptr, true);
   sensor("uptime", "Uptime", "s", "duration", nullptr, true);
@@ -1159,29 +1210,48 @@ void publishDiscovery() {
   sensor("last_remote", "Last remote press", nullptr, nullptr, "mdi:remote", false);
   sensor("radio_rssi", "Remote signal", "dBm", "signal_strength", nullptr, true);
   {
-    JsonDocument d;
-    d["name"] = "CC1101 radio"; d["unique_id"] = nodeId() + "_radio"; d["state_topic"] = topic("diag/radio");
-    d["payload_on"] = "ON"; d["payload_off"] = "OFF"; d["device_class"] = "connectivity"; d["entity_category"] = "diagnostic";
-    deviceJson(d.as<JsonObject>());
-    publishJson(disc + "/binary_sensor/" + nodeId() + "_radio/config", d);
+    JsonObject c = component(cmps, "radio", "binary_sensor");
+    c["name"] = "CC1101 radio"; c["unique_id"] = nodeId() + "_radio"; c["state_topic"] = topic("diag/radio");
+    c["payload_on"] = "ON"; c["payload_off"] = "OFF"; c["device_class"] = "connectivity"; c["entity_category"] = "diagnostic";
   }
   {
-    JsonDocument d;
-    d["name"] = "Remote button"; d["unique_id"] = nodeId() + "_remote_event"; d["state_topic"] = topic("remote/event");
-    JsonArray et = d["event_types"].to<JsonArray>();
+    JsonObject c = component(cmps, "remote_event", "event");
+    c["name"] = "Remote button"; c["unique_id"] = nodeId() + "_remote_event"; c["state_topic"] = topic("remote/event");
+    JsonArray et = c["event_types"].to<JsonArray>();
     et.add("open"); et.add("close"); et.add("stop");
     et.add("open_long"); et.add("close_long"); et.add("stop_long");
-    d["icon"] = "mdi:remote";
-    deviceJson(d.as<JsonObject>());
-    publishJson(disc + "/event/" + nodeId() + "_remote_event/config", d);
+    c["icon"] = "mdi:remote";
   }
   {
-    JsonDocument d;
-    d["name"] = "Learn remote"; d["unique_id"] = nodeId() + "_learn"; d["command_topic"] = topic("learn/set");
-    d["payload_press"] = "START"; d["icon"] = "mdi:school"; d["entity_category"] = "config";
-    deviceJson(d.as<JsonObject>());
-    publishJson(disc + "/button/" + nodeId() + "_learn/config", d);
+    JsonObject c = component(cmps, "learn", "button");
+    c["name"] = "Learn remote"; c["unique_id"] = nodeId() + "_learn"; c["command_topic"] = topic("learn/set");
+    c["payload_press"] = "START"; c["icon"] = "mdi:school"; c["entity_category"] = "config";
   }
+  JsonDocument sceneIds;
+  for (size_t k = 0; k < sceneCount; ++k) {  // one Home Assistant scene each
+    JsonObject c = component(cmps, String("scene_") + scenes[k].id, "scene");
+    c["name"] = scenes[k].name; c["unique_id"] = nodeId() + "_scene_" + scenes[k].id; c["icon"] = "mdi:blinds";
+    c["command_topic"] = topic("scene/set"); c["payload_on"] = scenes[k].id;
+    sceneIds.add(scenes[k].id);
+  }
+  JsonDocument oldScenes;
+  if (!deserializeJson(oldScenes, prefs.getString("pubscenes", "[]"))) {
+    for (JsonVariantConst v : oldScenes.as<JsonArrayConst>()) {
+      bool still = false;
+      for (size_t k = 0; k < sceneCount; ++k) still |= scenes[k].id == v.as<String>();
+      if (still) continue;
+      removedComponent(cmps, String("scene_") + v.as<String>(), "scene");
+      mqtt.publish((disc + "/scene/" + nodeId() + "_scene_" + v.as<String>() + "/config").c_str(), "", true);
+    }
+  }
+  publishJson(disc + "/device/" + nodeId() + "/config", d);
+  { String ss; serializeJson(sceneIds, ss); prefs.putString("pubscenes", ss); }
+  if (migrating) {
+    for (const String& t : legacyDiscoveryTopics()) mqtt.publish(t.c_str(), "", true);
+    LOGI("Home Assistant: now on device discovery");
+  }
+  if (!prefs.getBool("devdisc", false)) prefs.putBool("devdisc", true);
+  migrateAtMs = 0;
   discoveryPending = false;
 }
 
@@ -1205,6 +1275,7 @@ void publishBlind(size_t i) {
   d["locked"] = st[i].locked;
   d["window_open"] = st[i].interlock;
   d["wind_retracted"] = st[i].windLocked;
+  d["partial_moves"] = st[i].partials;
   JsonArray pr = d["presets"].to<JsonArray>();
   for (int k = 0; k < 4; ++k) if (cfg[i].presetPos[k] >= 0) pr.add(cfg[i].presetName[k] + " " + String(cfg[i].presetPos[k]) + "%");
   mqtt.publish(blindTopic(i, "lock").c_str(), st[i].locked ? "ON" : "OFF", true);
@@ -1390,6 +1461,7 @@ bool handleBlindCommand(size_t i, String cmd, const String& source, String& err)
       st[j].motion = Motion::Stopped;
       st[j].position = st[j].startPos = st[j].target = p;
       st[j].lastSource = "marked";
+      st[j].partials = 0;
       st[j].dirty = true;
     }
     requestPositionSave();
@@ -1436,6 +1508,7 @@ void updateMotion() {
     } else {
       haltMotion(i, s.lastSource);
       s.position = s.startPos = s.target = goal;  // endpoint reached: motor stops at its limit
+      if (goal == 0 || goal == 100) s.partials = 0;  // re-synced (haltMotion counted it as part way)
       if (s.after >= 0) {  // reference run finished: now go where we were asked to
         const int next = s.after;
         s.after = -1;
@@ -1903,7 +1976,8 @@ bool fromOwnPage() {
 
 // DNS rebinding: a web site can point its own name at this bridge's address, and the
 // browser then treats the bridge as that site. The Host header still carries the other
-// site's name, so only answer to the bridge's own IP addresses and name.
+// site's name, so only answer to the bridge's own IP addresses and name, plus the extra
+// names an admin added (a router's DNS name such as aok-blinds.lan).
 bool hostAllowed(String h) {
   if (h.startsWith("[")) return false;  // IPv6 literal: the bridge only serves on IPv4
   const int colon = h.indexOf(':');
@@ -1912,6 +1986,7 @@ bool hostAllowed(String h) {
   if (h.endsWith(".")) h.remove(h.length() - 1);
   String name = net.hostname; name.toLowerCase();
   if (h == name || h == name + ".local") return true;
+  if (aok::hostInList(h.c_str(), net.extraHosts.c_str())) return true;
   if (netUp() && h == netIp().toString()) return true;
   if (WiFi.status() == WL_CONNECTED && h == WiFi.localIP().toString()) return true;  // Ethernet builds with Wi-Fi too
   return apMode && h == WiFi.softAPIP().toString();
@@ -1920,7 +1995,7 @@ bool hostAllowed(String h) {
 bool hostOk() {
   if (hostAllowed(web.hostHeader())) return true;
   LOGW("Refused %s: sent to the unknown name '%s'", web.uri().c_str(), web.hostHeader().c_str());
-  sendError("refused: open the bridge by its IP address or its .local name", 403);
+  sendError("refused: open the bridge by its IP address or its .local name, or add this name under Settings, Device, Other names", 403);
   return false;
 }
 
@@ -2087,6 +2162,7 @@ void handleConfigGet() {
   n["mqtt_host"] = net.mqttHost; n["mqtt_port"] = net.mqttPort; n["mqtt_user"] = net.mqttUser;
   n["mqtt_pass_set"] = net.mqttPass.length() > 0; n["base_topic"] = net.base; n["discovery_prefix"] = net.discovery;
   n["brand"] = net.brand; n["tz"] = net.tz; n["tz_name"] = net.tzName;
+  n["extra_hosts"] = net.extraHosts; n["resync_after"] = net.resyncEvery; n["resync_through"] = net.resyncThrough;
   JsonObject p = d["pins"].to<JsonObject>();
   p["sck"] = pins.sck; p["miso"] = pins.miso; p["mosi"] = pins.mosi; p["cs"] = pins.cs;
   p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm; p["rx_bw"] = pins.rxBw;
@@ -2102,12 +2178,22 @@ void handleNetworkPost() {
   if (!authed(true)) return;
   JsonDocument d; if (!bodyJson(d)) return;
   if (!net.adminPass.length()) {
-    for (const char* k : {"mqtt_host", "mqtt_port", "mqtt_user", "mqtt_pass", "base_topic", "discovery_prefix"})
+    for (const char* k : {"mqtt_host", "mqtt_port", "mqtt_user", "mqtt_pass", "base_topic", "discovery_prefix", "extra_hosts", "resync_after", "resync_through"})
       if (!d[k].isNull()) { sendError(kNeedPassword, 403); return; }
   }
   const bool passChange = d["admin_pass"].is<const char*>();
   if (passChange && net.adminPass.length() && String(d["admin_current"] | "") != net.adminPass) {
     sendError("the current admin password is wrong", 403);
+    return;
+  }
+  // Extra names widen what the DNS-rebinding check lets in, so only the admin sets them (checked above).
+  std::string hosts;
+  if (d["extra_hosts"].is<const char*>() && aok::parseHostList(d["extra_hosts"].as<const char*>(), hosts) < 0) {
+    sendError("other names: up to 4 names such as aok-blinds.lan, separated by commas");
+    return;
+  }
+  if (!d["resync_after"].isNull() && (!d["resync_after"].is<int>() || d["resync_after"].as<int>() < 0 || d["resync_after"].as<int>() > 100)) {
+    sendError("re-sync after: 0 (off) to 100 moves");
     return;
   }
   bool reboot = false;
@@ -2127,6 +2213,9 @@ void handleNetworkPost() {
   if (d["base_topic"].is<const char*>() && d["base_topic"].as<String>().length()) net.base = slug(d["base_topic"].as<String>());
   if (d["discovery_prefix"].is<const char*>() && d["discovery_prefix"].as<String>().length()) net.discovery = d["discovery_prefix"].as<String>();
   if (d["brand"].is<const char*>()) { String v = d["brand"].as<String>(); v.trim(); if (v.length() && v.length() <= 24) net.brand = v; }
+  if (d["extra_hosts"].is<const char*>() && net.extraHosts != hosts.c_str()) { net.extraHosts = hosts.c_str(); LOGI("Other names for the page: %s", hosts.length() ? hosts.c_str() : "none"); }
+  if (d["resync_after"].is<int>()) net.resyncEvery = d["resync_after"].as<int>();
+  if (d["resync_through"].is<bool>()) net.resyncThrough = d["resync_through"];
   if (d["tz"].is<const char*>()) {
     net.tz = d["tz"].as<String>(); net.tzName = d["tz_name"] | "";
     setenv("TZ", net.tz.length() ? net.tz.c_str() : "UTC0", 1); tzset();
@@ -2236,6 +2325,7 @@ void handleCalibratePost() {
     const int p = calMotion == Motion::Opening ? 100 : 0;
     st[calIndex].motion = Motion::Stopped;
     st[calIndex].position = st[calIndex].startPos = st[calIndex].target = p;
+    st[calIndex].partials = 0;
     st[calIndex].dirty = true;
     saveBlinds();
     requestPositionSave();
@@ -2353,6 +2443,7 @@ void handleBackup() {
   n["hostname"] = net.hostname; n["brand"] = net.brand; n["tz"] = net.tz; n["tz_name"] = net.tzName;
   n["mqtt_host"] = net.mqttHost; n["mqtt_port"] = net.mqttPort; n["mqtt_user"] = net.mqttUser;
   n["base_topic"] = net.base; n["discovery_prefix"] = net.discovery;
+  n["extra_hosts"] = net.extraHosts; n["resync_after"] = net.resyncEvery; n["resync_through"] = net.resyncThrough;
   JsonObject p = d["pins"].to<JsonObject>();
   p["sck"] = pins.sck; p["miso"] = pins.miso; p["mosi"] = pins.mosi; p["cs"] = pins.cs;
   p["gdo0"] = pins.gdo0; p["gdo2"] = pins.gdo2; p["led"] = pins.led; p["mhz"] = pins.mhz; p["pa_dbm"] = pins.paDbm; p["rx_bw"] = pins.rxBw;
@@ -2377,6 +2468,10 @@ void handleRestore() {
     net.mqttHost = n["mqtt_host"] | net.mqttHost; net.mqttPort = n["mqtt_port"] | net.mqttPort;
     net.mqttUser = n["mqtt_user"] | net.mqttUser; net.base = n["base_topic"] | net.base;
     net.discovery = n["discovery_prefix"] | net.discovery;
+    std::string hosts;
+    if (n["extra_hosts"].is<const char*>() && aok::parseHostList(n["extra_hosts"].as<const char*>(), hosts) >= 0) net.extraHosts = hosts.c_str();
+    net.resyncEvery = constrain(static_cast<int>(n["resync_after"] | net.resyncEvery), 0, 100);
+    net.resyncThrough = n["resync_through"] | net.resyncThrough;
   }
   JsonObjectConst p = d["pins"];
   if (!p.isNull()) {
@@ -2967,7 +3062,7 @@ void setup() {
   if (!safeMode) setupRadio();
   setupWifi();
   setupWeb();
-  mqtt.setBufferSize(2048);
+  mqtt.setBufferSize(6144);  // a blind or the bridge in one device discovery message
   mqtt.setCallback(onMqtt);
 }
 
@@ -2979,6 +3074,7 @@ void loop() {
   if (otaReady) ArduinoOTA.handle();
   ensureMqtt();
   if (mqtt.connected()) mqtt.loop();
+  if (mqtt.connected() && discoveryPending) publishDiscovery();  // scene changes, and the move to device discovery
   pollRadio();
   updateMotion();
   finishPress();

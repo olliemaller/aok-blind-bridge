@@ -521,6 +521,13 @@ details summary{cursor:pointer;color:var(--text2);font-weight:500;font-size:13px
             <div class="field"><span>Admin password</span><input type="password" id="n_admin" placeholder="None" autocomplete="new-password"><small>User name is <span class="mono">admin</span>. Leave blank to keep the current one.</small></div>
             <div class="field" id="adminCurRow" style="display:none"><span>Current admin password</span><input type="password" id="n_admin_cur" autocomplete="current-password"><small>Needed to change or remove the password.</small></div>
           </div>
+          <div id="adminRows" style="display:none">
+            <div class="grid2">
+              <div class="field"><span>Other names</span><input type="text" id="n_extra_hosts" placeholder="aok-blinds.lan" spellcheck="false"><small>Names from your router that open this page, such as <span class="mono">aok-blinds.lan</span>. Up to 4, separated by commas. Other names are refused, which blocks DNS rebinding.</small></div>
+              <div class="field"><span>Re-sync after (moves)</span><input type="number" id="n_resync_after" min="0" max="100" placeholder="10"><small>Positions are timed, so moves that stop part way add a little error. After this many, the next move to fully open or closed waits the whole run time so the end counts. 0 turns it off.</small></div>
+            </div>
+            <label class="switch" style="margin-bottom:12px"><input type="checkbox" id="n_resync_through"><span><b style="font-weight:600">Re-sync through an end stop</b><br><span class="muted small">When a re-sync is due and the next move is part way, the blind goes to the nearer end first, then on to the position. Off by default, because you see it take the long way.</span></span></label>
+          </div>
           <div class="btns"><button class="btn pri" onclick="saveNet('device')">Save</button><button class="btn ghost dng" id="adminClear" style="display:none" onclick="clearPass()">Remove password</button></div>
         </div>
       </div>
@@ -1095,10 +1102,11 @@ function toggleLogPause(){logPaused=!logPaused;$('logPause').textContent=logPaus
 /* settings */
 function fillSettings(){
   if(!C)return;const n=C.network;
-  ['ssid','hostname','mqtt_host','mqtt_port','mqtt_user','base_topic','discovery_prefix'].forEach(k=>{const e=$('n_'+k);if(document.activeElement!==e&&!e.dataset.touched)e.value=n[k]??''});
+  ['ssid','hostname','mqtt_host','mqtt_port','mqtt_user','base_topic','discovery_prefix','extra_hosts','resync_after'].forEach(k=>{const e=$('n_'+k);if(document.activeElement!==e&&!e.dataset.touched)e.value=n[k]??''});
   $('passSet').textContent=n.pass_set?'(saved)':'';$('mqttPassSet').textContent=n.mqtt_pass_set?'(saved)':'';
   $('n_admin').placeholder=n.admin_set?'Password set: type a new one to change':'None';
-  $('adminCurRow').style.display=$('adminClear').style.display=n.admin_set?'':'none';
+  $('adminCurRow').style.display=$('adminClear').style.display=$('adminRows').style.display=n.admin_set?'':'none';
+  if(!$('n_resync_through').dataset.touched)$('n_resync_through').checked=!!n.resync_through;
   if(document.activeElement!==$('n_brand')&&!$('n_brand').dataset.touched)$('n_brand').value=n.brand||'';
   const tzSel=$('n_tz');
   if(!tzSel.options.length)tzSel.innerHTML=TZS.map(([z])=>`<option value="${z}">${z.replace(/_/g,' ').replace('/',' / ')}</option>`).join('');
@@ -1135,7 +1143,7 @@ async function saveNet(which){
   const b={},v=k=>$('n_'+k).value.trim(),n=C?C.network:{};
   if(which=='wifi'){if(!v('ssid'))return toast('Enter the network name',true);b.ssid=v('ssid');if($('n_pass').value)b.pass=$('n_pass').value}
   if(which=='mqtt'){b.mqtt_host=v('mqtt_host');b.mqtt_port=parseInt(v('mqtt_port'))||1883;b.mqtt_user=v('mqtt_user');if($('n_mqtt_pass').value)b.mqtt_pass=$('n_mqtt_pass').value;b.base_topic=v('base_topic');b.discovery_prefix=v('discovery_prefix')}
-  if(which=='device'){b.hostname=v('hostname');b.brand=v('brand')||'A-OK';const z=TZS.find(t=>t[0]==$('n_tz').value);if(z){b.tz=z[1];b.tz_name=z[0]}if($('n_admin').value){b.admin_pass=$('n_admin').value;if(n.admin_set){if(!$('n_admin_cur').value)return toast('Type the current admin password to change it',true);b.admin_current=$('n_admin_cur').value}}}
+  if(which=='device'){b.hostname=v('hostname');b.brand=v('brand')||'A-OK';const z=TZS.find(t=>t[0]==$('n_tz').value);if(z){b.tz=z[1];b.tz_name=z[0]}if(n.admin_set){b.extra_hosts=v('extra_hosts');b.resync_after=v('resync_after')===''?10:parseInt(v('resync_after'));if(!(b.resync_after>=0&&b.resync_after<=100))return toast('Re-sync after: 0 to 100 moves',true);b.resync_through=$('n_resync_through').checked}if($('n_admin').value){b.admin_pass=$('n_admin').value;if(n.admin_set){if(!$('n_admin_cur').value)return toast('Type the current admin password to change it',true);b.admin_current=$('n_admin_cur').value}}}
   const j=await api('/api/network',b);
   if(j){toast(j.rebooting?'Saved. Restarting…':'Saved');blindSig='';fullRev=-1;document.querySelectorAll('#s-settings input,#s-settings select').forEach(e=>{delete e.dataset.touched;if(e.type=='password')e.value=''});loadConfig()}
 }

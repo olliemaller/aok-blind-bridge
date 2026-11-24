@@ -2,6 +2,19 @@
 
 The bridge uses MQTT discovery. MQTT is a simple messaging system: a broker (a small server, usually the Mosquitto add-on on Home Assistant) passes messages between the bridge and Home Assistant, and discovery messages tell Home Assistant which entities exist. Once the bridge is connected to your broker, the blinds appear under **Settings → Devices & services → MQTT**, with no YAML. Each blind is its own device, so it can sit in its own area. If you set a room for the blind, Home Assistant suggests that area.
 
+## Discovery topics
+
+From 1.9.0 the bridge uses Home Assistant's device discovery: one retained message per device, listing that device's entities under `cmps`. You need Home Assistant 2025.1 or later (the version that can move entities from per-entity discovery).
+
+| Topic | What's in it |
+|---|---|
+| `<prefix>/device/<base>_<blind>/config` | One per blind: the cover, the *Favourite position*, *Mark as open* and *Mark as closed* buttons, the *Lock* switch and the named position buttons |
+| `<prefix>/device/<base>/config` | The bridge: its sensors, the remote-button event, *Learn remote* and the scenes |
+
+`<prefix>` is `homeassistant` and `<base>` is `aok_blinds` unless you changed them. An entity that goes away (a favourite or named position removed, a scene deleted) is sent as `{"p":"button"}` or `{"p":"scene"}`, which removes it. Deleting a blind sends an empty message to its device topic, which removes the device.
+
+**Upgrading from 1.8.0 or earlier.** Those versions sent one message per entity (`<prefix>/cover/...`, `<prefix>/button/...` and so on). The first time 1.9.0 connects, it sends `{"migrate_discovery":true}` to each old topic, waits 3 seconds, sends the device messages, then clears the old topics. The unique IDs are the same, so your entities keep their names, areas, history and automations, and nothing appears twice. The Home Assistant log shows a "Migration to MQTT device discovery schema" line for each entity. Going back to 1.8.0 later: clear the retained `<prefix>/device/...` topics of the bridge first (see *Reset and removal* in the README), or Home Assistant sees each entity twice.
+
 ## Entities
 
 **Each blind**
@@ -15,7 +28,9 @@ The bridge uses MQTT discovery. MQTT is a simple messaging system: a broker (a s
 | *Lock* switch | While on, Home Assistant, scenes and schedules leave the blind alone. The hand remote and Stop still work |
 | Scenes | One `scene.` entity per scene from *Scenes & schedules* |
 
-The cover's attributes include `channels`, `last_source` (`web`, `home_assistant`, `hand_remote` and so on), the travel times and `position_known`.
+The cover's attributes include `channels`, `last_source` (`web`, `home_assistant`, `hand_remote` and so on), the travel times, `position_known` and `partial_moves` (moves that stopped part way since the blind last reached an end stop).
+
+**All blinds as one entity.** The bridge doesn't add one; Home Assistant's cover group does it: *Settings → Devices & services → Helpers → Create helper → Group → Cover group*, then pick the blinds. `<base>/all/set` moves every blind in one radio frame, if you'd rather call that from an automation.
 
 **The bridge**
 
@@ -85,6 +100,11 @@ actions:
 The motors don't report where they are. The bridge works out each blind's position from how long it has been moving, using its opening and closing times. Moves to the end stops (fully open or closed) run a little longer than the travel time, so the motor stops itself at its limit. Moves to a middle position send Stop when the time is up.
 
 If a blind gets out of step (for example, it was moved while the bridge was off), press **Mark as open** or **Mark as closed**, or just open or close it fully once.
+
+**Drift correction (1.9.0).** Each move that stops part way adds a little timing error, so the bridge counts them per blind (the count survives a restart and shows as `partial_moves`). A run that reaches an end stop starts the count again. Once the count reaches *Re-sync after* (10 by default; 0 turns it off, under *Settings → Device*):
+
+- The next move to fully open or closed waits the whole run time, not the estimated remaining time, before it counts the blind as there. Nothing looks different: the motor runs to its limit as always.
+- With *Re-sync through an end stop* on (off by default), a move to a middle position goes to the nearer end first, then on to the position. Without it, part-way moves carry on as normal until the next full open or close.
 
 ## Window and wind examples
 
