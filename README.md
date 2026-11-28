@@ -1,12 +1,25 @@
-# A-OK Blind Bridge
+<p align="center">
+  <img src="https://raw.githubusercontent.com/olliemaller/aok-blind-bridge/main/images/banner.png" alt="A-OK Blind Bridge" width="100%">
+</p>
 
-[![CI](https://github.com/olliemaller/aok-blind-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/olliemaller/aok-blind-bridge/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/olliemaller/aok-blind-bridge)](https://github.com/olliemaller/aok-blind-bridge/releases/latest)
-[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
+<p align="center">
+  <a href="https://github.com/olliemaller/aok-blind-bridge/releases"><img src="https://img.shields.io/github/v/release/olliemaller/aok-blind-bridge?style=for-the-badge&color=FFFFFF&labelColor=000000" alt="Release"></a>
+  <a href="https://github.com/olliemaller/aok-blind-bridge/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/olliemaller/aok-blind-bridge/ci.yml?branch=main&style=for-the-badge&label=checks&labelColor=000000" alt="Checks"></a>
+  <a href="https://github.com/olliemaller/aok-blind-bridge/blob/main/LICENSE"><img src="https://img.shields.io/github/license/olliemaller/aok-blind-bridge?style=for-the-badge&label=licence&color=FFFFFF&labelColor=000000" alt="Licence"></a>
+  <a href="https://maller.com.au/projects/aok-blind-bridge/"><img src="https://img.shields.io/badge/Read-the%20write--up-FFFFFF?style=for-the-badge&labelColor=000000" alt="Read the write-up"></a>
+  <a href="https://maller.com.au/"><img src="https://img.shields.io/badge/Site-maller.com.au-FFFFFF?style=for-the-badge&labelColor=000000" alt="maller.com.au"></a>
+</p>
 
-Local control of **433.92 MHz A-OK blind motors** from Home Assistant, using an ESP32 and a CC1101 radio module (about A$15 of parts). Motorised blinds sold as **Motolux**, and under other brands, use these motors with remotes such as the AC127. No cloud, no Tuya hub and no app.
+<p align="center">
+  <b>Local control of 433.92 MHz A-OK blind motors from Home Assistant.</b><br>
+  An ESP32 and a CC1101 radio module, about A$15 of parts. Motorised blinds sold as <b>Motolux</b>, and under other brands, use these motors with remotes such as the AC127. <b>No cloud, no Tuya hub and no app.</b>
+</p>
 
-**[Install it from your browser →](https://blinds.maller.com.au/)**
+<p align="center">
+  <a href="https://blinds.maller.com.au/"><img src="https://img.shields.io/badge/Install%20it%20from%20your%20browser%20%E2%86%92-FFFFFF?style=for-the-badge&logo=googlechrome&logoColor=000000" alt="Install it from your browser" height="36"></a>
+</p>
+
+---
 
 <p align="center"><img src="docs/images/dashboard.png" alt="The bridge's dashboard" width="760"></p>
 
